@@ -1,0 +1,34 @@
+# Use an official Python runtime as a parent image, slim version for smaller footprint
+FROM python:3.11-slim
+
+# Set environment variables to ensure Python output is logged immediately and no pyc files are written
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV APP_HOME=/usr/src/app
+
+# Set the working directory
+WORKDIR $APP_HOME
+
+# Install system dependencies (required for building certain Python packages like numpy/pandas)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+# Copying only requirements first leverages Docker cache to speed up builds
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY app/ app/
+COPY models/ models/
+COPY main.py .
+
+# Create a non-root user for security (OWASP recommendation)
+RUN adduser --disabled-password --gecos "" quantuser
+RUN chown -R quantuser:quantuser $APP_HOME
+USER quantuser
+
+# Define the entry point for the container
+CMD ["python", "main.py"]
