@@ -1,0 +1,30 @@
+# Core Framework & Utilities
+python-dotenv==1.0.1
+pydantic==2.6.4
+requests==2.31.0
+numpy==1.26.4
+pandas==2.2.1
+
+# Exchange Integration & Trading APIs
+ccxt==4.2.56
+# MetaTrader5==5.0.45  # Uncomment if using MetaTrader5 instead of CCXT
+
+# Database & Storage
+supabase==2.3.0
+psycopg2-binary==2.9.9
+
+# Telegram Bot & Notifications (if applicable)
+python-telegram-bot==20.8
+
+# Logging & Monitoring
+colorlog==6.8.2
+schedule==1.2.1
+
+# Web Dashboard / API (if using FastAPI/Streamlit components)
+fastapi==0.110.0
+uvicorn==0.28.0
+streamlit==1.32.0
+
+# Testing
+pytest==8.1.1
+pytest-cov==4.1.0
