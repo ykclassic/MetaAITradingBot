@@ -1,103 +1,85 @@
-"""
-Application Entry Point (Composition Root).
-Wires dependencies, configures logging, and starts the system.
-"""
+"""Application entry point."""
 
 import logging
+import os
 import sys
+
 from dotenv import load_dotenv
 
-from app.config import AppConfig
-from app.data.mt5_adapter import MT5Adapter
-from app.features.engine import PandasFeatureEngine
-from app.regimes.manager import ModelManager
-from app.regimes.hmm_detector import HMMRegimeDetector
-from app.strategies.implementations import EMATrendStrategy, RSIMeanReversionStrategy, ATRBreakoutStrategy
 from app.allocation.selector import PrioritySignalSelector
-from app.risk.manager import StandardRiskManager
+from app.config import AppConfig
+from app.data.xt_adapter import XTAdapter
 from app.execution.engine import ExecutionEngine
+from app.features.engine import PandasFeatureEngine
 from app.pipeline.orchestrator import TradingPipeline
+from app.regimes.hmm_detector import HMMRegimeDetector
+from app.regimes.manager import ModelManager
+from app.risk.manager import StandardRiskManager
+from app.strategies.implementations import (
+    ATRBreakoutStrategy,
+    EMATrendStrategy,
+    RSIMeanReversionStrategy,
+)
 
-def setup_logging():
-    """Configures centralized, structured logging to standard output."""
+
+def setup_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)]
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
-    # Silence verbose external libraries
-    logging.getLogger("hmmlearn").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-def main():
-    # 1. Initialize Logging & Config
-    setup_logging()
-    logger = logging.getLogger("main")
-    logger.info("Bootstrapping Algorithmic Trading System...")
-    
-    # Load .env file if running locally
-    load_dotenv()
-    config = AppConfig.load_from_env()
 
-    # 2. Instantiate Data & Feature Layers
-    adapter = MT5Adapter(
-        login=config.mt5_login,
-        password=config.mt5_password,
-        server=config.mt5_server,
-        path=config.mt5_path
-    )
-    
-    feature_engine = PandasFeatureEngine()
-
-    # 3. Instantiate Machine Learning Regime Layer
-    model_manager = ModelManager(model_dir="models/")
+def build_pipeline(config: AppConfig) -> TradingPipeline:
+    adapter = XTAdapter(api_key=config.xt_api_key, secret_key=config.xt_secret_key)
+    model_manager = ModelManager(model_dir=config.model_dir)
     regime_detector = HMMRegimeDetector(
         manager=model_manager,
         version_id=config.model_version,
-        confidence_threshold=0.65
+        confidence_threshold=config.model_confidence_threshold,
     )
-
-    # 4. Instantiate Strategy Portfolio
-    strategies = [
-        EMATrendStrategy(),
-        RSIMeanReversionStrategy(),
-        ATRBreakoutStrategy()
-    ]
-
-    # 5. Instantiate Arbitration & Risk Layers
-    signal_selector = PrioritySignalSelector()
-    
-    risk_manager = StandardRiskManager(
-        risk_per_trade_pct=config.risk_per_trade_pct,
-        max_daily_drawdown_pct=config.max_daily_drawdown_pct,
-        max_open_positions=config.max_open_positions,
-        contract_size=100000.0  # Standard forex lot
-    )
-
-    # 6. Instantiate Execution Layer
-    execution_engine = ExecutionEngine(adapter=adapter)
-
-    # 7. Wire the Orchestrator
-    pipeline = TradingPipeline(
+    return TradingPipeline(
         adapter=adapter,
-        feature_engine=feature_engine,
+        feature_engine=PandasFeatureEngine(),
         regime_detector=regime_detector,
-        strategies=strategies,
-        signal_selector=signal_selector,
-        risk_manager=risk_manager,
-        execution_engine=execution_engine,
+        strategies=[EMATrendStrategy(), RSIMeanReversionStrategy(), ATRBreakoutStrategy()],
+        signal_selector=PrioritySignalSelector(),
+        risk_manager=StandardRiskManager(
+            risk_per_trade_pct=config.risk_per_trade_pct,
+            max_daily_drawdown_pct=config.max_daily_drawdown_pct,
+            max_open_positions=config.max_open_positions,
+            contract_size=config.contract_size,
+        ),
+        execution_engine=ExecutionEngine(adapter=adapter),
         symbols=config.symbols,
         timeframe=config.timeframe,
-        lookback_periods=100
+        lookback_periods=config.lookback_periods,
     )
 
-    # 8. Launch the continuous loop
+
+def main() -> None:
+    setup_logging()
+    logger = logging.getLogger("main")
+    load_dotenv()
+    config = AppConfig.load_from_env()
+
+    # CI/scheduled jobs run one cycle; local deployments can opt into the loop.
+    run_once = os.environ.get("RUN_ONCE", "true").lower() in {"1", "true", "yes"}
+    pipeline = build_pipeline(config)
     try:
-        pipeline.start(cycle_interval_seconds=60)
+        if run_once:
+            if pipeline.adapter.connect():
+                pipeline.run_cycle()
+            else:
+                raise RuntimeError("Unable to connect to XT.com")
+        else:
+            pipeline.start(cycle_interval_seconds=config.cycle_interval_seconds)
     except KeyboardInterrupt:
         logger.info("Manual shutdown requested.")
     finally:
-        logger.info("System has been gracefully terminated.")
+        pipeline.stop()
+
 
 if __name__ == "__main__":
     main()
