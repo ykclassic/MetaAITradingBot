@@ -1,57 +1,41 @@
-"""
-Environment-based Configuration Manager.
-Loads and validates critical settings from the environment.
-"""
+"""Environment-based application configuration."""
 
 import os
-import logging
 from dataclasses import dataclass
 from typing import List
 
-logger = logging.getLogger(__name__)
 
-@dataclass
+@dataclass(frozen=True)
 class AppConfig:
-    # Trading Parameters (No defaults - must come first)
     symbols: List[str]
     timeframe: str
     risk_per_trade_pct: float
     max_daily_drawdown_pct: float
     max_open_positions: int
-    
-    # Model Configuration
     model_version: str
-
-    # Broker Credentials (Have defaults - must come last)
-    mt5_login: int = 0
-    mt5_password: str = ""
-    mt5_server: str = ""
-    mt5_path: str = ""
+    model_dir: str
+    model_confidence_threshold: float
+    cycle_interval_seconds: int
+    lookback_periods: int
+    contract_size: float
+    xt_api_key: str = ""
+    xt_secret_key: str = ""
 
     @classmethod
     def load_from_env(cls) -> "AppConfig":
-        """Safely loads configuration from environment variables."""
-        try:
-            return cls(
-                # Trading Parameters
-                symbols=os.environ.get("TRADE_SYMBOLS", "EURUSD,GBPUSD").split(","),
-                timeframe=os.environ.get("TIMEFRAME", "M15"),
-                risk_per_trade_pct=float(os.environ.get("RISK_PER_TRADE_PCT", "0.01")),
-                max_daily_drawdown_pct=float(os.environ.get("MAX_DAILY_DRAWDOWN_PCT", "0.05")),
-                max_open_positions=int(os.environ.get("MAX_OPEN_POSITIONS", "3")),
-                
-                # Model Configuration
-                model_version=os.environ.get("MODEL_VERSION", "v1"),
-
-                # Broker Credentials
-                mt5_login=int(os.environ.get("MT5_LOGIN", "0")),
-                mt5_password=os.environ.get("MT5_PASSWORD", ""),
-                mt5_server=os.environ.get("MT5_SERVER", ""),
-                mt5_path=os.environ.get("MT5_PATH", "")
-            )
-        except KeyError as e:
-            logger.critical(f"Missing required environment variable: {e}")
-            raise SystemExit(f"Configuration Error: Missing {e}")
-        except ValueError as e:
-            logger.critical(f"Invalid environment variable type: {e}")
-            raise SystemExit(f"Configuration Error: {e}")
+        symbols = [s.strip() for s in os.getenv("TRADE_SYMBOLS", "BTC_USDT,ETH_USDT").split(",") if s.strip()]
+        return cls(
+            symbols=symbols,
+            timeframe=os.getenv("TIMEFRAME", "M15"),
+            risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "0.01")),
+            max_daily_drawdown_pct=float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.05")),
+            max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "3")),
+            model_version=os.getenv("MODEL_VERSION", "v1.0.0"),
+            model_dir=os.getenv("MODEL_DIR", "models/"),
+            model_confidence_threshold=float(os.getenv("MODEL_CONFIDENCE_THRESHOLD", "0.65")),
+            cycle_interval_seconds=int(os.getenv("CYCLE_INTERVAL_SECONDS", "60")),
+            lookback_periods=int(os.getenv("LOOKBACK_PERIODS", "100")),
+            contract_size=float(os.getenv("CONTRACT_SIZE", "1.0")),
+            xt_api_key=os.getenv("XT_API_KEY", ""),
+            xt_secret_key=os.getenv("XT_SECRET_KEY", ""),
+        )
