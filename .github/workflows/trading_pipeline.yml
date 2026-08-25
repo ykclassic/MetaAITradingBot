@@ -39,6 +39,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Verify XT credentials are configured
+        env:
+          XT_API_KEY: ${{ secrets.XT_API_KEY }}
+          XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
+        run: |
+          test -n "$XT_API_KEY" || { echo "XT_API_KEY GitHub Actions secret is missing or empty."; exit 1; }
+          test -n "$XT_SECRET_KEY" || { echo "XT_SECRET_KEY GitHub Actions secret is missing or empty."; exit 1; }
       - name: Execute Safe Trading Cycle Verification
         env:
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
