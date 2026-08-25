@@ -33,21 +33,25 @@ class XTAdapter(MarketDataAdapter):
         """Return local time adjusted to XT server time when available."""
         return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
-    def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
+    def _signature(
+        self,
+        method: str,
+        path: str,
+        timestamp: str,
+        query: str = "",
+        body: str = "",
+    ) -> str:
         """Generate XT HmacSHA256 signature using XT's documented canonical form."""
-        # XT signs the validate-appkey + validate-timestamp header component,
-        # followed by #path#query#body. Algorithm/recv-window headers are sent
-        # but are not part of the canonical header string.
+        # XT's v4 signature canonical header component includes all four
+        # validation fields, followed by #METHOD#PATH#QUERY or #BODY.
         header_component = (
-            f"validate-appkey={self.api_key}"
+            "validate-algorithms=HmacSHA256"
+            f"&validate-appkey={self.api_key}"
+            f"&validate-recvwindow={self.RECV_WINDOW_MS}"
             f"&validate-timestamp={timestamp}"
         )
-        data_components = [path]
-        if query:
-            data_components.append(query)
-        if body:
-            data_components.append(body)
-        signing_payload = header_component + "#" + "#".join(data_components)
+        data = query if query else body
+        signing_payload = f"{header_component}#{method.upper()}#{path}#{data}"
         return hmac.new(
             self.secret_key.encode("utf-8"),
             signing_payload.encode("utf-8"),
