@@ -4,6 +4,7 @@ Ensures drawdown limits are respected and position sizing math is perfectly accu
 """
 
 import pytest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from app.risk.manager import StandardRiskManager
@@ -74,7 +75,7 @@ def test_risk_manager_rejects_max_drawdown(base_account, buy_signal):
 def test_risk_manager_rejects_micro_lot_breach(base_account, buy_signal):
     # Test a scenario where the stop loss is so wide, or equity so low, that risk < 0.01 lots
     base_account.equity = 100.0 # Only $100 equity
-    buy_signal.stop_loss = 1.0000 # 1000 pips (0.1000) SL
+    buy_signal = replace(buy_signal, stop_loss=1.0000) # 1000 pips (0.1000) SL
     
     manager = StandardRiskManager(risk_per_trade_pct=0.01) # Risking $1
     
