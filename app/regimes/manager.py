@@ -18,6 +18,7 @@ from app.features.engine import PandasFeatureEngine
 class ModelManager:
     TRAIN_COLS = ["trend_distance", "atr_14", "rsi_14", "bb_width_20"]
     MAPPING_SCHEMA_VERSION = 2
+    MIN_COVARIANCE = 1e-6
 
     def __init__(self, model_dir: str = "models/"):
         self.model_dir = model_dir
@@ -32,8 +33,6 @@ class ModelManager:
         if len(X) < 50:
             raise ValueError(f"Insufficient feature history to train HMM: {len(X)} samples")
 
-        # The raw indicators have very different scales. Standardize them before
-        # fitting so the covariance estimate is well-conditioned.
         mean = X.mean(axis=0)
         std = X.std(axis=0)
         std = np.where(std < 1e-12, 1.0, std)
@@ -42,16 +41,20 @@ class ModelManager:
         model = hmm.GaussianHMM(
             n_components=4,
             covariance_type="diag",
-            n_iter=200,
+            n_iter=300,
             random_state=42,
-            min_covar=1e-3,
+            min_covar=self.MIN_COVARIANCE,
         )
         model.fit(X_scaled)
 
+        # hmmlearn can still learn a zero/near-zero diagonal variance for a state
+        # with insufficiently diverse observations. Clamp it to a small positive
+        # value so the persisted model remains valid for Cholesky/log-density work.
+        model.covars_ = np.maximum(np.asarray(model.covars_, dtype=float), self.MIN_COVARIANCE)
         if not np.isfinite(model.covars_).all():
             raise ValueError("HMM training produced non-finite covariance values")
-        if (model.covars_ <= 0).any():
-            raise ValueError("HMM training produced non-positive covariance values")
+        if (model.covars_ < self.MIN_COVARIANCE).any():
+            raise ValueError("HMM covariance stabilization failed")
 
         states = model.predict(X_scaled)
         frame["state"] = states
@@ -141,7 +144,6 @@ class ModelManager:
         with open(mapping_path, "r", encoding="utf-8") as f:
             raw_map = json.load(f)
 
-        # Backward-compatible support for the original flat mapping format.
         if "states" in raw_map:
             mapping_raw = raw_map["states"]
             metadata = raw_map
