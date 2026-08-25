@@ -1,10 +1,20 @@
 """Runtime environment configuration package."""
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from typing import List
 
 from .schema import RiskConfig, SystemConfig
+
+
+def _clean_secret(name: str) -> str:
+    """Normalize credentials copied through shells/UI and remove hidden Unicode marks."""
+    value = unicodedata.normalize("NFKC", os.getenv(name, "")).strip()
+    value = "".join(ch for ch in value if unicodedata.category(ch) not in {"Cf", "Cc"})
+    if value and any(ord(ch) > 255 for ch in value):
+        raise ValueError(f"{name} contains unsupported non-HTTP-header characters")
+    return value
 
 
 @dataclass(frozen=True)
@@ -40,8 +50,8 @@ class AppConfig:
             lookback_periods=int(os.getenv("LOOKBACK_PERIODS", "100")),
             contract_size=float(os.getenv("CONTRACT_SIZE", "1.0")),
             live_trading_enabled=os.getenv("LIVE_TRADING_ENABLED", "false").lower() in {"1", "true", "yes"},
-            xt_api_key=os.getenv("XT_API_KEY", ""),
-            xt_secret_key=os.getenv("XT_SECRET_KEY", ""),
+            xt_api_key=_clean_secret("XT_API_KEY"),
+            xt_secret_key=_clean_secret("XT_SECRET_KEY"),
         )
 
 
