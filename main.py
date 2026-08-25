@@ -51,7 +51,10 @@ def build_pipeline(config: AppConfig) -> TradingPipeline:
             max_open_positions=config.max_open_positions,
             contract_size=config.contract_size,
         ),
-        execution_engine=ExecutionEngine(adapter=adapter),
+        execution_engine=ExecutionEngine(
+            adapter=adapter,
+            live_trading_enabled=config.live_trading_enabled,
+        ),
         symbols=config.symbols,
         timeframe=config.timeframe,
         lookback_periods=config.lookback_periods,
@@ -64,7 +67,6 @@ def main() -> None:
     load_dotenv()
     config = AppConfig.load_from_env()
 
-    # CI/scheduled jobs run one cycle; local deployments can opt into the loop.
     run_once = os.environ.get("RUN_ONCE", "true").lower() in {"1", "true", "yes"}
     pipeline = build_pipeline(config)
     try:
