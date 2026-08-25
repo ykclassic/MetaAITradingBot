@@ -30,7 +30,6 @@ class XTAdapter(MarketDataAdapter):
         self._server_time_offset_ms = 0
 
     def _timestamp_ms(self) -> str:
-        """Return local time adjusted to XT server time when available."""
         return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
     def _signature(
@@ -41,9 +40,7 @@ class XTAdapter(MarketDataAdapter):
         query: str = "",
         body: str = "",
     ) -> str:
-        """Generate XT HmacSHA256 signature using XT's documented canonical form."""
-        # XT's v4 signature canonical header component includes all four
-        # validation fields, followed by #METHOD#PATH#QUERY or #BODY.
+        """Generate the XT v4 HmacSHA256 canonical signature."""
         header_component = (
             "validate-algorithms=HmacSHA256"
             f"&validate-appkey={self.api_key}"
@@ -51,7 +48,10 @@ class XTAdapter(MarketDataAdapter):
             f"&validate-timestamp={timestamp}"
         )
         data = query if query else body
-        signing_payload = f"{header_component}#{method.upper()}#{path}#{data}"
+        if data:
+            signing_payload = f"{header_component}#{method.upper()}#{path}#{data}"
+        else:
+            signing_payload = f"{header_component}#{method.upper()}#{path}"
         return hmac.new(
             self.secret_key.encode("utf-8"),
             signing_payload.encode("utf-8"),
@@ -70,7 +70,6 @@ class XTAdapter(MarketDataAdapter):
         }
 
     def _sync_server_time(self) -> None:
-        """Estimate XT server/local clock offset from the public time endpoint."""
         started = int(time.time() * 1000)
         response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=5)
         response.raise_for_status()
