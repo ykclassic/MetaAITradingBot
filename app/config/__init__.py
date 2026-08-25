@@ -20,6 +20,7 @@ class AppConfig:
     cycle_interval_seconds: int
     lookback_periods: int
     contract_size: float
+    live_trading_enabled: bool = False
     xt_api_key: str = ""
     xt_secret_key: str = ""
 
@@ -38,6 +39,7 @@ class AppConfig:
             cycle_interval_seconds=int(os.getenv("CYCLE_INTERVAL_SECONDS", "60")),
             lookback_periods=int(os.getenv("LOOKBACK_PERIODS", "100")),
             contract_size=float(os.getenv("CONTRACT_SIZE", "1.0")),
+            live_trading_enabled=os.getenv("LIVE_TRADING_ENABLED", "false").lower() in {"1", "true", "yes"},
             xt_api_key=os.getenv("XT_API_KEY", ""),
             xt_secret_key=os.getenv("XT_SECRET_KEY", ""),
         )
