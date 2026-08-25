@@ -16,8 +16,13 @@ class HMMRegimeDetector(RegimeDetectorProtocol):
     def __init__(self, manager: ModelManager, version_id: str, confidence_threshold: float = 0.65):
         self.version_id = version_id
         self.confidence_threshold = confidence_threshold
+
         loaded = manager.load_model(version_id)
-        self.model, self.mapping, self.preprocessing = loaded
+        if not isinstance(loaded, tuple) or len(loaded) not in (2, 3):
+            raise ValueError("ModelManager.load_model must return (model, mapping) or (model, mapping, metadata)")
+
+        self.model, self.mapping = loaded[:2]
+        self.preprocessing = loaded[2] if len(loaded) == 3 and isinstance(loaded[2], dict) else {}
 
         mean = self.preprocessing.get("feature_mean")
         std = self.preprocessing.get("feature_std")
@@ -28,6 +33,7 @@ class HMMRegimeDetector(RegimeDetectorProtocol):
                 raise ValueError("Invalid persisted HMM preprocessing metadata")
             self.feature_std = np.where(self.feature_std < 1e-12, 1.0, self.feature_std)
         else:
+            # Legacy/test models were trained on raw features and have no scaler metadata.
             self.feature_mean = None
             self.feature_std = None
 
