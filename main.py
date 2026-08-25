@@ -34,11 +34,48 @@ def setup_logging() -> None:
 def build_pipeline(config: AppConfig) -> TradingPipeline:
     adapter = XTAdapter(api_key=config.xt_api_key, secret_key=config.xt_secret_key)
     model_manager = ModelManager(model_dir=config.model_dir)
+
+    model_path = os.path.join(config.model_dir, f"hmm_v_{config.model_version}.joblib")
+    mapping_path = os.path.join(config.model_dir, f"mapping_v_{config.model_version}.json")
+    model_missing = not (os.path.exists(model_path) and os.path.exists(mapping_path))
+
+    if model_missing:
+        if config.live_trading_enabled:
+            raise FileNotFoundError(
+                f"Model version {config.model_version} missing files. "
+                "A prevalidated model artifact is required when live trading is enabled."
+            )
+
+        logger = logging.getLogger("main")
+        logger.warning(
+            "Model %s is missing; safe verification mode will bootstrap a temporary model "
+            "from fresh XT.com candles. LIVE_TRADING_ENABLED remains false.",
+            config.model_version,
+        )
+        if not adapter.connect():
+            raise RuntimeError("Unable to connect to XT.com for verification model bootstrap")
+
+        candles_by_symbol = {}
+        bootstrap_count = max(config.lookback_periods, 200)
+        for symbol in config.symbols:
+            candles_by_symbol[symbol] = adapter.get_ohlcv(
+                symbol,
+                config.timeframe,
+                bootstrap_count,
+            )
+
+        model_manager.bootstrap_from_candles(
+            candles_by_symbol=candles_by_symbol,
+            version_id=config.model_version,
+            timeframe=config.timeframe,
+        )
+
     regime_detector = HMMRegimeDetector(
         manager=model_manager,
         version_id=config.model_version,
         confidence_threshold=config.model_confidence_threshold,
     )
+
     return TradingPipeline(
         adapter=adapter,
         feature_engine=PandasFeatureEngine(),
@@ -71,10 +108,9 @@ def main() -> None:
     pipeline = build_pipeline(config)
     try:
         if run_once:
-            if pipeline.adapter.connect():
-                pipeline.run_cycle()
-            else:
+            if not pipeline.adapter.is_connected() and not pipeline.adapter.connect():
                 raise RuntimeError("Unable to connect to XT.com")
+            pipeline.run_cycle()
         else:
             pipeline.start(cycle_interval_seconds=config.cycle_interval_seconds)
     except KeyboardInterrupt:
