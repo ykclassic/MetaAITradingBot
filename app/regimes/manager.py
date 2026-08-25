@@ -47,13 +47,16 @@ class ModelManager:
         )
         model.fit(X_scaled)
 
-        # hmmlearn can still learn a zero/near-zero diagonal variance for a state
-        # with insufficiently diverse observations. Clamp it to a small positive
-        # value so the persisted model remains valid for Cholesky/log-density work.
-        model.covars_ = np.maximum(np.asarray(model.covars_, dtype=float), self.MIN_COVARIANCE)
-        if not np.isfinite(model.covars_).all():
+        # For covariance_type="diag", hmmlearn exposes covars_ as expanded
+        # square matrices but stores the diagonal parameters internally as a
+        # (n_components, n_features) array. Clamp the internal representation
+        # to avoid sending the expanded matrices back through the setter.
+        model._covars_ = np.maximum(
+            np.asarray(model._covars_, dtype=float), self.MIN_COVARIANCE
+        )
+        if not np.isfinite(model._covars_).all():
             raise ValueError("HMM training produced non-finite covariance values")
-        if (model.covars_ < self.MIN_COVARIANCE).any():
+        if (model._covars_ < self.MIN_COVARIANCE).any():
             raise ValueError("HMM covariance stabilization failed")
 
         states = model.predict(X_scaled)
