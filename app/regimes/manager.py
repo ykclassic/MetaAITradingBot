@@ -7,6 +7,7 @@ import os
 from typing import Dict, Iterable, Tuple
 
 import joblib
+import numpy as np
 import pandas as pd
 from hmmlearn import hmm
 
@@ -15,35 +16,60 @@ from app.features.engine import PandasFeatureEngine
 
 
 class ModelManager:
+    TRAIN_COLS = ["trend_distance", "atr_14", "rsi_14", "bb_width_20"]
+    MAPPING_SCHEMA_VERSION = 2
+
     def __init__(self, model_dir: str = "models/"):
         self.model_dir = model_dir
         os.makedirs(self.model_dir, exist_ok=True)
 
     def train_and_save(self, features_df: pd.DataFrame, version_id: str) -> None:
-        """Trains the HMM and maps states to regimes based on statistical profiles."""
-        n_components = 4
+        """Train a numerically stable HMM and persist its preprocessing metadata."""
+        frame = features_df.copy()
+        X = frame[self.TRAIN_COLS].astype(float).to_numpy()
+        if not np.isfinite(X).all():
+            raise ValueError("HMM training features contain non-finite values")
+        if len(X) < 50:
+            raise ValueError(f"Insufficient feature history to train HMM: {len(X)} samples")
+
+        # The raw indicators have very different scales. Standardize them before
+        # fitting so the covariance estimate is well-conditioned.
+        mean = X.mean(axis=0)
+        std = X.std(axis=0)
+        std = np.where(std < 1e-12, 1.0, std)
+        X_scaled = (X - mean) / std
+
         model = hmm.GaussianHMM(
-            n_components=n_components,
-            covariance_type="full",
-            n_iter=100,
+            n_components=4,
+            covariance_type="diag",
+            n_iter=200,
             random_state=42,
+            min_covar=1e-3,
         )
+        model.fit(X_scaled)
 
-        train_cols = ["trend_distance", "atr_14", "rsi_14", "bb_width_20"]
-        X = features_df[train_cols].astype(float).values
-        model.fit(X)
-        states = model.predict(X)
-        features_df = features_df.copy()
-        features_df["state"] = states
+        if not np.isfinite(model.covars_).all():
+            raise ValueError("HMM training produced non-finite covariance values")
+        if (model.covars_ <= 0).any():
+            raise ValueError("HMM training produced non-positive covariance values")
 
-        mapping = self._map_states_to_regimes(features_df)
+        states = model.predict(X_scaled)
+        frame["state"] = states
+        mapping = self._map_states_to_regimes(frame)
 
         model_path = os.path.join(self.model_dir, f"hmm_v_{version_id}.joblib")
         mapping_path = os.path.join(self.model_dir, f"mapping_v_{version_id}.json")
 
         joblib.dump(model, model_path)
+        payload = {
+            "schema_version": self.MAPPING_SCHEMA_VERSION,
+            "states": {str(k): v.value for k, v in mapping.items()},
+            "feature_columns": self.TRAIN_COLS,
+            "feature_mean": mean.tolist(),
+            "feature_std": std.tolist(),
+        }
         with open(mapping_path, "w", encoding="utf-8") as f:
-            json.dump({str(k): v.value for k, v in mapping.items()}, f)
+            json.dump(payload, f)
 
     def bootstrap_from_candles(
         self,
@@ -54,9 +80,8 @@ class ModelManager:
         """
         Build a verification-only model from fresh exchange candles.
 
-        This is deliberately intended for safe runtime verification when a
-        prevalidated artifact is absent. Production/live execution must still
-        provision a reviewed model artifact instead of auto-training one.
+        Production/live execution must still provision a reviewed model artifact
+        rather than auto-training one.
         """
         engine = PandasFeatureEngine()
         rows = []
@@ -70,11 +95,7 @@ class ModelManager:
                 )
 
             for end in range(engine.MIN_CANDLES, len(candle_list) + 1):
-                snapshot = engine.compute_features(
-                    symbol,
-                    timeframe,
-                    candle_list[:end],
-                )
+                snapshot = engine.compute_features(symbol, timeframe, candle_list[:end])
                 rows.append(snapshot.features)
 
         if len(rows) < 50:
@@ -86,18 +107,16 @@ class ModelManager:
         self.train_and_save(features_df, version_id)
 
     def _map_states_to_regimes(self, df: pd.DataFrame) -> Dict[int, MarketRegime]:
-        """Analyzes state statistics to map arbitrary HMM integers to domain regimes."""
+        """Analyze state statistics to map arbitrary HMM integers to domain regimes."""
         stats = df.groupby("state").agg(
             {"trend_distance": "mean", "atr_14": "mean"}
         )
-
         median_vol = stats["atr_14"].median()
         mapping = {}
 
         for state in stats.index:
             mean_trend = stats.loc[state, "trend_distance"]
             mean_vol = stats.loc[state, "atr_14"]
-
             if mean_trend > 0.001:
                 mapping[state] = MarketRegime.STRONG_TREND_UP
             elif mean_trend < -0.001:
@@ -106,13 +125,12 @@ class ModelManager:
                 mapping[state] = MarketRegime.RANGE_HIGH_VOL
             else:
                 mapping[state] = MarketRegime.RANGE_LOW_VOL
-
         return mapping
 
     def load_model(
         self, version_id: str
-    ) -> Tuple[hmm.GaussianHMM, Dict[int, MarketRegime]]:
-        """Loads a specific version of the model and its mapping."""
+    ) -> Tuple[hmm.GaussianHMM, Dict[int, MarketRegime], dict]:
+        """Load a model, its regime mapping, and preprocessing metadata."""
         model_path = os.path.join(self.model_dir, f"hmm_v_{version_id}.joblib")
         mapping_path = os.path.join(self.model_dir, f"mapping_v_{version_id}.json")
 
@@ -123,5 +141,13 @@ class ModelManager:
         with open(mapping_path, "r", encoding="utf-8") as f:
             raw_map = json.load(f)
 
-        mapping = {int(k): MarketRegime(v) for k, v in raw_map.items()}
-        return model, mapping
+        # Backward-compatible support for the original flat mapping format.
+        if "states" in raw_map:
+            mapping_raw = raw_map["states"]
+            metadata = raw_map
+        else:
+            mapping_raw = raw_map
+            metadata = {}
+
+        mapping = {int(k): MarketRegime(v) for k, v in mapping_raw.items()}
+        return model, mapping, metadata
