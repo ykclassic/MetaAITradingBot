@@ -27,22 +27,35 @@ class XTAdapter(MarketDataAdapter):
         self.secret_key = secret_key
         self._state = ConnectionState.DISCONNECTED
         self.session = requests.Session()
+        self._server_time_offset_ms = 0
+
+    def _timestamp_ms(self) -> str:
+        """Return local time adjusted to XT server time when available."""
+        return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
     def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
-        """Generate XT v4 HmacSHA256 signature for the exact request payload."""
-        canonical_headers = (
-            f"validate-algorithms=HmacSHA256&validate-appkey={self.api_key}"
-            f"&validate-recvwindow={self.RECV_WINDOW_MS}&validate-timestamp={timestamp}"
+        """Generate XT HmacSHA256 signature using XT's documented canonical form."""
+        # XT signs the validate-appkey + validate-timestamp header component,
+        # followed by #path#query#body. Algorithm/recv-window headers are sent
+        # but are not part of the canonical header string.
+        header_component = (
+            f"validate-appkey={self.api_key}"
+            f"&validate-timestamp={timestamp}"
         )
-        original = f"{canonical_headers}#{method.upper()}#{path}#{query or body}"
+        data_components = [path]
+        if query:
+            data_components.append(query)
+        if body:
+            data_components.append(body)
+        signing_payload = header_component + "#" + "#".join(data_components)
         return hmac.new(
             self.secret_key.encode("utf-8"),
-            original.encode("utf-8"),
+            signing_payload.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
 
     def _signed_headers(self, method: str, path: str, query: str = "", body: str = "") -> dict:
-        timestamp = str(int(time.time() * 1000))
+        timestamp = self._timestamp_ms()
         return {
             "validate-algorithms": "HmacSHA256",
             "validate-appkey": self.api_key,
@@ -52,14 +65,27 @@ class XTAdapter(MarketDataAdapter):
             "Content-Type": "application/json",
         }
 
+    def _sync_server_time(self) -> None:
+        """Estimate XT server/local clock offset from the public time endpoint."""
+        started = int(time.time() * 1000)
+        response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=5)
+        response.raise_for_status()
+        ended = int(time.time() * 1000)
+        payload = response.json()
+        if payload.get("rc") != 0:
+            raise RuntimeError(
+                f"XT time endpoint returned rc={payload.get('rc')}: {payload.get('mc')}"
+            )
+        server_time = payload.get("result", {}).get("serverTime")
+        if server_time is None:
+            raise RuntimeError("XT time endpoint returned no serverTime")
+        midpoint = (started + ended) // 2
+        self._server_time_offset_ms = int(server_time) - midpoint
+
     def connect(self) -> bool:
         self._state = ConnectionState.CONNECTING
         try:
-            response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=5)
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("rc") not in (None, 0):
-                raise RuntimeError(f"XT time endpoint returned rc={payload.get('rc')}: {payload.get('mc')}")
+            self._sync_server_time()
             self._state = ConnectionState.CONNECTED
             logger.info("Successfully connected to XT.com API.")
             return True
@@ -176,7 +202,6 @@ class XTAdapter(MarketDataAdapter):
                 )
 
             order_id = data.get("result", {}).get("orderId")
-            # XT's submit endpoint confirms acceptance, not final fill. Do not report FILLED here.
             return OrderResult(
                 idempotency_key=request.idempotency_key,
                 correlation_id=request.correlation_id,
@@ -206,8 +231,6 @@ class XTAdapter(MarketDataAdapter):
         return payload.get("result", [])
 
     def get_open_positions(self) -> List[Position]:
-        # Spot accounts do not expose MT5-style positions; pending orders are tracked
-        # through get_account_state(). This adapter returns an empty position list.
         return []
 
     def _build_failed_result(self, request: OrderRequest, state: OrderExecutionState, msg: str) -> OrderResult:
