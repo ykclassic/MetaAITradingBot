@@ -6,39 +6,50 @@ on:
   workflow_dispatch:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: quantitative-trading-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -m pip check
       - name: Run Tests
-        run: pytest -q
+        run: python -m pytest -q
 
   execute-trading-cycle:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -m pip check
       - name: Verify XT credentials are configured
         env:
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
@@ -63,4 +74,5 @@ jobs:
           LOOKBACK_PERIODS: '100'
           RUN_ONCE: 'true'
           LIVE_TRADING_ENABLED: 'false'
+          PYTHONUNBUFFERED: '1'
         run: python main.py
