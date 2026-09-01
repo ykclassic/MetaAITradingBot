@@ -45,42 +45,70 @@ class TradingPipeline:
         """Execute one complete pass; infrastructure/authentication failures are fatal."""
         if not self.adapter.is_connected():
             raise ConnectionError("Adapter is disconnected. Cannot execute trading cycle.")
+
+        logger.info("TRADING CYCLE START: symbols=%s timeframe=%s", ",".join(self.symbols), self.timeframe)
         account_state = self.adapter.get_account_state()
+        logger.info(
+            "ACCOUNT STATE READY: equity=%s available=%s open_orders=%s drawdown=%s",
+            account_state.equity,
+            account_state.free_margin,
+            account_state.open_positions_count,
+            account_state.current_daily_drawdown_pct,
+        )
         for symbol in self.symbols:
             self._process_symbol(symbol, account_state)
+        logger.info("TRADING CYCLE COMPLETE")
 
     def _process_symbol(self, symbol: str, account_state: "AccountState") -> None:
-        logger.debug("Starting pipeline evaluation for %s", symbol)
+        logger.info("SYMBOL START: %s", symbol)
         try:
             candles = self.adapter.get_ohlcv(symbol, self.timeframe, self.lookback_periods)
             if not candles:
-                logger.warning("No market data returned for %s. Skipping.", symbol)
+                logger.warning("MARKET DATA EMPTY: %s", symbol)
                 return
+            logger.info("MARKET DATA READY: %s candles=%d", symbol, len(candles))
+
             features = self.feature_engine.compute_features(symbol, self.timeframe, candles)
+            logger.info("FEATURES READY: %s", symbol)
+
             regime = self.regime_detector.predict(features)
+            logger.info("REGIME READY: %s", symbol)
+
             signals = []
             for strategy in self.strategies:
                 signal = strategy.generate_signal(features, regime)
                 if signal:
                     signals.append(signal)
+            logger.info("SIGNAL EVALUATION: %s candidates=%d", symbol, len(signals))
             if not signals:
-                logger.info("No strategy signal for %s.", symbol)
+                logger.info("NO TRADE SIGNAL: %s", symbol)
                 return
+
             best_signal = self.signal_selector.select_best_signal(signals)
             if not best_signal:
-                logger.info("Signal arbitration rejected all signals for %s.", symbol)
+                logger.info("SIGNAL ARBITRATION REJECTED: %s", symbol)
                 return
+            logger.info("SIGNAL SELECTED: %s direction=%s", symbol, best_signal.direction.value)
+
             order_request = self.risk_manager.evaluate_signal(best_signal, account_state)
             if not order_request:
-                logger.info("Risk manager rejected signal for %s.", symbol)
+                logger.info("RISK REJECTED: %s", symbol)
                 return
+            logger.info(
+                "RISK APPROVED: %s quantity=%s entry=%s stop=%s target=%s",
+                symbol,
+                order_request.volume,
+                order_request.price,
+                order_request.stop_loss,
+                order_request.take_profit,
+            )
+
             result = self.execution_engine.execute_order(order_request)
+            logger.info("EXECUTION RESULT: %s state=%s order_id=%s", symbol, result.execution_state.value, result.order_id)
             if result.execution_state == OrderExecutionState.EXECUTION_UNCERTAIN:
                 logger.critical("Execution uncertain for %s. Manual review required.", symbol)
                 self.is_running = False
         except Exception:
-            # Component/data errors are isolated to this symbol; the next configured
-            # symbol must still be evaluated in the same cycle.
             logger.error("Error processing symbol %s", symbol, exc_info=True)
             return
 
