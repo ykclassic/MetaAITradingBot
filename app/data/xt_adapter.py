@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import urlencode
@@ -19,6 +20,11 @@ from app.domain.models import AccountState, OrderRequest, OrderResult, Position
 logger = logging.getLogger(__name__)
 
 
+def _clean_credential(value: str) -> str:
+    """Normalize credentials copied through UIs that may add invisible Unicode marks."""
+    return "".join(ch for ch in value if unicodedata.category(ch) != "Cf").strip()
+
+
 class XTAdapter(MarketDataAdapter):
     BASE_URL = "https://sapi.xt.com"
     RECV_WINDOW_MS = 5000
@@ -27,8 +33,8 @@ class XTAdapter(MarketDataAdapter):
     RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
     def __init__(self, api_key: str, secret_key: str):
-        self.api_key = api_key.strip()
-        self.secret_key = secret_key.strip()
+        self.api_key = _clean_credential(api_key)
+        self.secret_key = _clean_credential(secret_key)
         self._state = ConnectionState.DISCONNECTED
         self.session = requests.Session()
         self._server_time_offset_ms = 0
@@ -157,7 +163,7 @@ class XTAdapter(MarketDataAdapter):
             raise ConnectionError("XT.com is not connected.")
         payload = self._request_json("GET", "/v4/balances", authenticated=True)
         if payload.get("rc") != 0:
-            raise RuntimeError(f"XT balances error rc={payload.get('rc')}: {payload.get('mc')}")
+            raise RuntimeError(f"XT balances error rc={payload.get('mc')}: {payload.get('mc')}")
         result = payload.get("result", {})
         assets = result.get("assets", []) if isinstance(result, dict) else []
         balances: Dict[str, dict] = {}
@@ -274,7 +280,7 @@ class XTAdapter(MarketDataAdapter):
         query = urlencode(sorted({"bizType": "SPOT"}.items()))
         payload = self._request_json("GET", path, query=query, authenticated=True)
         if payload.get("rc") != 0:
-            raise RuntimeError(f"XT open-order error rc={payload.get('rc')}: {payload.get('mc')}")
+            raise RuntimeError(f"XT open-order error rc={payload.get('mc')}: {payload.get('mc')}")
         result = payload.get("result", [])
         return result if isinstance(result, list) else []
 
