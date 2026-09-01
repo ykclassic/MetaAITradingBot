@@ -89,7 +89,8 @@ class SingleSignalSelector:
         return signals[0] if signals else None
 
 
-def test_safe_pipeline_reaches_signal_risk_and_execution_gate_without_order_submission():
+def test_safe_pipeline_reaches_signal_risk_and_execution_gate_without_order_submission(caplog):
+    caplog.set_level("INFO")
     adapter = FakeAdapter()
     pipeline = TradingPipeline(
         adapter=adapter,
@@ -111,4 +112,10 @@ def test_safe_pipeline_reaches_signal_risk_and_execution_gate_without_order_subm
 
     pipeline.run_cycle()
 
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("MARKET DATA READY: BTC_USDT" in message for message in messages)
+    assert any("FEATURES READY: BTC_USDT" in message for message in messages)
+    assert any("SIGNAL SELECTED: BTC_USDT" in message for message in messages)
+    assert any("RISK APPROVED: BTC_USDT" in message for message in messages)
+    assert any("EXECUTION GATE REACHED: LIVE_TRADING_ENABLED=false" in message for message in messages)
     assert adapter.order_calls == 0
