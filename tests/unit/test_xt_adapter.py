@@ -20,14 +20,16 @@ class FakeResponse:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
-def test_xt_v4_signature_excludes_method_and_recvwindow_from_canonical_payload():
+def test_xt_v4_signature_includes_algorithm_recvwindow_method_and_path():
     adapter = XTAdapter("app-key", "secret-key")
     timestamp = "1641446237201"
 
     expected_payload = (
-        "validate-appkey=app-key"
+        "validate-algorithms=HmacSHA256"
+        "&validate-appkey=app-key"
+        "&validate-recvwindow=5000"
         "&validate-timestamp=1641446237201"
-        "#/v4/balances"
+        "#GET#/v4/balances"
     )
     expected = hmac.new(
         b"secret-key",
@@ -36,7 +38,7 @@ def test_xt_v4_signature_excludes_method_and_recvwindow_from_canonical_payload()
     ).hexdigest()
 
     assert adapter._signature("GET", "/v4/balances", timestamp) == expected
-    assert adapter._signature("POST", "/v4/balances", timestamp) == expected
+    assert adapter._signature("POST", "/v4/balances", timestamp) != expected
 
 
 def test_xt_v4_signature_uses_query_and_body_in_order():
@@ -46,9 +48,11 @@ def test_xt_v4_signature_uses_query_and_body_in_order():
     body = '{"quantity":2,"price":39000}'
 
     expected_payload = (
-        "validate-appkey=app-key"
+        "validate-algorithms=HmacSHA256"
+        "&validate-appkey=app-key"
+        "&validate-recvwindow=5000"
         "&validate-timestamp=1641446237201"
-        "#/v4/order#bizType=SPOT#{\"quantity\":2,\"price\":39000}"
+        "#POST#/v4/order#bizType=SPOT#{\"quantity\":2,\"price\":39000}"
     )
     expected = hmac.new(
         b"secret-key",
