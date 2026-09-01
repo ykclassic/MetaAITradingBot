@@ -37,9 +37,18 @@ class XTAdapter(MarketDataAdapter):
         return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
     def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
-        del method
-        header_component = f"validate-appkey={self.api_key}&validate-timestamp={timestamp}"
-        components = [path]
+        """Build XT v4's HmacSHA256 canonical signing message.
+
+        XT v4 signs the algorithm, app key, recv window and timestamp headers,
+        followed by method, path, query (when present) and exact request body.
+        """
+        header_component = (
+            f"validate-algorithms=HmacSHA256"
+            f"&validate-appkey={self.api_key}"
+            f"&validate-recvwindow={self.RECV_WINDOW_MS}"
+            f"&validate-timestamp={timestamp}"
+        )
+        components = [method.upper(), path]
         if query:
             components.append(query)
         if body:
@@ -110,8 +119,6 @@ class XTAdapter(MarketDataAdapter):
                     continue
                 raise
 
-            # HTTP transport errors are handled before JSON parsing so a proxy/CDN
-            # HTML error page cannot bypass the retry policy.
             if response.status_code in self.RETRYABLE_STATUS_CODES and attempts <= self.MAX_RETRIES:
                 retry_after = response.headers.get("Retry-After")
                 try:
@@ -221,6 +228,7 @@ class XTAdapter(MarketDataAdapter):
             "side": "BUY" if request.direction == SignalDirection.BUY else "SELL",
             "type": "LIMIT",
             "timeInForce": "GTC",
+            "bizType": "SPOT",
             "price": request.price,
             "quantity": request.volume,
         }
