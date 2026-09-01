@@ -1,32 +1,28 @@
-"""
-Execution Engine.
-Responsible for idempotency checks, executing trades via the adapter, and handling exceptions safely.
-"""
+"""Execution engine for broker order submission and idempotency."""
 
 import logging
-from typing import Set
 from datetime import datetime, timezone
+from typing import Set
 
 from app.core.interfaces import MarketDataAdapter
-from app.domain.models import OrderRequest, OrderResult
 from app.domain.enums import OrderExecutionState
+from app.domain.models import OrderRequest, OrderResult
 
 logger = logging.getLogger(__name__)
 
 
 class ExecutionEngine:
-    """Safely executes orders and tracks idempotency."""
+    """Safely executes orders and makes every execution gate observable."""
 
     def __init__(self, adapter: MarketDataAdapter, live_trading_enabled: bool = True):
         self.adapter = adapter
         self.live_trading_enabled = live_trading_enabled
-        # In-memory idempotency cache. In production, this should be distributed (e.g., Redis).
         self._processed_requests: Set[str] = set()
 
     def execute_order(self, request: OrderRequest) -> OrderResult:
         """Execute an order only when live trading is explicitly enabled."""
         if request.idempotency_key in self._processed_requests:
-            logger.warning(f"Duplicate order request blocked. Key: {request.idempotency_key}")
+            logger.warning("EXECUTION BLOCKED: duplicate idempotency key=%s", request.idempotency_key)
             return self._build_failed_result(
                 request,
                 OrderExecutionState.REJECTED_BY_BROKER,
@@ -37,8 +33,8 @@ class ExecutionEngine:
 
         if not self.live_trading_enabled:
             logger.warning(
-                "LIVE_TRADING_ENABLED=false: order submission blocked. "
-                "The trading cycle was verified through risk evaluation without placing a trade."
+                "EXECUTION GATE REACHED: LIVE_TRADING_ENABLED=false; "
+                "XT order submission intentionally skipped."
             )
             return self._build_failed_result(
                 request,
@@ -46,29 +42,34 @@ class ExecutionEngine:
                 "Live trading disabled by configuration.",
             )
 
+        logger.info(
+            "XT ORDER SUBMISSION START: side=%s symbol=%s quantity=%s price=%s correlation_id=%s",
+            request.direction.value,
+            request.symbol,
+            request.volume,
+            request.price,
+            request.correlation_id,
+        )
+
         try:
-            logger.info(
-                f"Sending {request.direction.value} order for {request.volume} {request.symbol} to adapter."
-            )
             result = self.adapter.send_order(request)
             self._log_execution_result(result)
             return result
-        except Exception as e:
-            logger.error(f"Critical failure during order execution: {str(e)}", exc_info=True)
+        except Exception as exc:
+            logger.error("XT order submission raised an unexpected exception", exc_info=True)
             return self._build_failed_result(
                 request,
                 OrderExecutionState.EXECUTION_UNCERTAIN,
-                f"Unhandled exception during adapter call: {str(e)}",
+                f"Unhandled exception during adapter call: {exc}",
             )
 
     def _build_failed_result(
         self, request: OrderRequest, state: OrderExecutionState, message: str
     ) -> OrderResult:
-        """Helper to construct deterministic failure results."""
         return OrderResult(
             idempotency_key=request.idempotency_key,
             correlation_id=request.correlation_id,
-            mt5_ticket=None,
+            order_id=None,
             execution_state=state,
             fill_price=0.0,
             filled_volume=0.0,
@@ -77,16 +78,19 @@ class ExecutionEngine:
         )
 
     def _log_execution_result(self, result: OrderResult) -> None:
-        """Centralized logging for execution outcomes."""
         if result.execution_state == OrderExecutionState.FILLED:
             logger.info(
-                f"Trade FILLED successfully. Ticket: {result.mt5_ticket}, "
-                f"Price: {result.fill_price}, Volume: {result.filled_volume}"
+                "TRADE FILLED: order_id=%s price=%s volume=%s",
+                result.order_id,
+                result.fill_price,
+                result.filled_volume,
             )
+        elif result.execution_state == OrderExecutionState.IN_FLIGHT:
+            logger.info("XT ORDER ACCEPTED: order_id=%s; awaiting fill confirmation", result.order_id)
         elif result.execution_state == OrderExecutionState.EXECUTION_UNCERTAIN:
             logger.critical(
-                "EXECUTION UNCERTAIN. Adapter failed to confirm trade status. "
-                f"Manual intervention required. Details: {result.error_message}"
+                "EXECUTION UNCERTAIN: XT did not confirm final order state. Details: %s",
+                result.error_message,
             )
         else:
-            logger.warning(f"Trade REJECTED/CANCELLED. Reason: {result.error_message}")
+            logger.warning("TRADE REJECTED/CANCELLED: %s", result.error_message)
