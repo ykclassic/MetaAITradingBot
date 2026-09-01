@@ -102,7 +102,7 @@ class OrderRequest:
 class OrderResult:
     idempotency_key: str
     correlation_id: UUID
-    mt5_ticket: Optional[int]
+    order_id: Optional[int]
     execution_state: OrderExecutionState
     fill_price: float
     filled_volume: float
