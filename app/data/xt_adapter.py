@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -37,11 +37,6 @@ class XTAdapter(MarketDataAdapter):
         return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
     def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
-        """Build XT v4's HmacSHA256 canonical signing message.
-
-        XT v4 signs the algorithm, app key, recv window and timestamp headers,
-        followed by method, path, query (when present) and exact request body.
-        """
         header_component = (
             f"validate-algorithms=HmacSHA256"
             f"&validate-appkey={self.api_key}"
@@ -95,7 +90,6 @@ class XTAdapter(MarketDataAdapter):
         self._server_time_offset_ms = int(server_time) - ((started + ended) // 2)
 
     def _request_json(self, method: str, path: str, *, query: str = "", body: str = "", authenticated: bool = False) -> dict:
-        """Issue an XT request with bounded retry and clock-resync handling."""
         url = f"{self.BASE_URL}{path}"
         if query:
             url = f"{url}?{query}"
@@ -157,19 +151,38 @@ class XTAdapter(MarketDataAdapter):
     def is_connected(self) -> bool:
         return self._state == ConnectionState.CONNECTED
 
+    def get_account_balances(self) -> Dict[str, dict]:
+        """Return XT spot balances keyed by currency without exposing credentials."""
+        if not self.is_connected():
+            raise ConnectionError("XT.com is not connected.")
+        payload = self._request_json("GET", "/v4/balances", authenticated=True)
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"XT balances error rc={payload.get('rc')}: {payload.get('mc')}")
+        result = payload.get("result", {})
+        assets = result.get("assets", []) if isinstance(result, dict) else []
+        balances: Dict[str, dict] = {}
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            currency = str(asset.get("currency", "")).lower()
+            if not currency:
+                continue
+            balances[currency] = {
+                "available": float(asset.get("availableAmount", 0.0)),
+                "frozen": float(asset.get("frozenAmount", 0.0)),
+                "total": float(asset.get("totalAmount", 0.0)),
+            }
+        return balances
+
     def get_account_state(self) -> AccountState:
         if not self.is_connected():
             raise ConnectionError("XT.com is not connected.")
         if not self.api_key or not self.secret_key:
             raise RuntimeError("XT_API_KEY and XT_SECRET_KEY are required for authenticated account access.")
         try:
-            payload = self._request_json("GET", "/v4/balances", authenticated=True)
-            if payload.get("rc") != 0:
-                raise RuntimeError(f"XT balances error rc={payload.get('rc')}: {payload.get('mc')}")
-            data = payload.get("result", {})
-            assets = data.get("assets", []) if isinstance(data, dict) else []
-            usdt = next((asset for asset in assets if isinstance(asset, dict) and asset.get("currency", "").lower() == "usdt"), None)
-            balance = float(usdt.get("availableAmount", 0.0)) if usdt else 0.0
+            balances = self.get_account_balances()
+            usdt = balances.get("usdt", {"available": 0.0})
+            balance = float(usdt["available"])
             open_orders = self._get_open_orders()
             return AccountState(
                 balance=balance,
@@ -195,7 +208,7 @@ class XTAdapter(MarketDataAdapter):
         query = urlencode([("interval", xt_interval), ("limit", count), ("symbol", xt_symbol)])
         payload = self._request_json("GET", "/v4/public/kline", query=query)
         if payload.get("rc") != 0:
-            raise RuntimeError(f"XT kline error rc={payload.get('rc')}: {payload.get('mc')}")
+            raise RuntimeError(f"XT kline error rc={payload.get('mc')}: {payload.get('mc')}")
         result = payload.get("result", [])
         if not isinstance(result, list):
             raise RuntimeError("XT kline endpoint returned an unexpected result")
@@ -215,7 +228,6 @@ class XTAdapter(MarketDataAdapter):
         return candles
 
     def send_order(self, request: OrderRequest) -> OrderResult:
-        """Submit an XT spot order and return the broker order id."""
         if not self.is_connected():
             return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, "XT.com Disconnected")
         if not self.api_key or not self.secret_key:
