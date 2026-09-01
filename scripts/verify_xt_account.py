@@ -3,8 +3,12 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Allow direct execution as `python scripts/verify_xt_account.py` from the repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.data.xt_adapter import XTAdapter
 
