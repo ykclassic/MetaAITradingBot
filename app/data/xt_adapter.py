@@ -36,52 +36,22 @@ class XTAdapter(MarketDataAdapter):
     def _timestamp_ms(self) -> str:
         return str(int(time.time() * 1000) + self._server_time_offset_ms)
 
-    def _signature(
-        self,
-        method: str,
-        path: str,
-        timestamp: str,
-        query: str = "",
-        body: str = "",
-    ) -> str:
-        """Generate the XT v4 HmacSHA256 signature.
-
-        XT's v4 scheme signs two components:
-        X = validate-appkey=<appkey>&validate-timestamp=<timestamp>
-        Y = #<path>#<query>#<body>, omitting empty query/body components.
-
-        The HTTP method and recvwindow are request metadata and are not part of
-        the canonical string. Keeping canonicalization in one function prevents
-        GET/POST implementations from silently drifting apart.
-        """
-        del method  # The v4 canonical payload does not include the HTTP method.
-        header_component = (
-            f"validate-appkey={self.api_key}"
-            f"&validate-timestamp={timestamp}"
-        )
-
+    def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
+        del method
+        header_component = f"validate-appkey={self.api_key}&validate-timestamp={timestamp}"
         components = [path]
         if query:
             components.append(query)
         if body:
             components.append(body)
-        data_component = "#" + "#".join(components)
-        signing_payload = f"{header_component}{data_component}"
-
+        signing_payload = f"{header_component}#" + "#".join(components)
         return hmac.new(
             self.secret_key.encode("utf-8"),
             signing_payload.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
 
-    def _signed_headers(
-        self,
-        method: str,
-        path: str,
-        query: str = "",
-        body: str = "",
-        timestamp: Optional[str] = None,
-    ) -> dict:
+    def _signed_headers(self, method: str, path: str, query: str = "", body: str = "", timestamp: Optional[str] = None) -> dict:
         timestamp = timestamp or self._timestamp_ms()
         return {
             "validate-algorithms": "HmacSHA256",
@@ -97,41 +67,25 @@ class XTAdapter(MarketDataAdapter):
         try:
             payload = response.json()
         except ValueError as exc:
-            raise RuntimeError(
-                f"XT returned non-JSON response (HTTP {response.status_code})"
-            ) from exc
+            raise RuntimeError(f"XT returned non-JSON response (HTTP {response.status_code})") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("XT returned an unexpected JSON payload type")
         return payload
 
     def _sync_server_time(self) -> None:
         started = int(time.time() * 1000)
-        response = self.session.get(
-            f"{self.BASE_URL}/v4/public/time",
-            timeout=self.REQUEST_TIMEOUT,
-        )
+        response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=self.REQUEST_TIMEOUT)
         response.raise_for_status()
         ended = int(time.time() * 1000)
         payload = self._response_payload(response)
         if payload.get("rc") != 0:
-            raise RuntimeError(
-                f"XT time endpoint returned rc={payload.get('rc')}: {payload.get('mc')}"
-            )
+            raise RuntimeError(f"XT time endpoint returned rc={payload.get('rc')}: {payload.get('mc')}")
         server_time = payload.get("result", {}).get("serverTime")
         if server_time is None:
             raise RuntimeError("XT time endpoint returned no serverTime")
-        midpoint = (started + ended) // 2
-        self._server_time_offset_ms = int(server_time) - midpoint
+        self._server_time_offset_ms = int(server_time) - ((started + ended) // 2)
 
-    def _request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        query: str = "",
-        body: str = "",
-        authenticated: bool = False,
-    ) -> dict:
+    def _request_json(self, method: str, path: str, *, query: str = "", body: str = "", authenticated: bool = False) -> dict:
         """Issue an XT request with bounded retry and clock-resync handling."""
         url = f"{self.BASE_URL}{path}"
         if query:
@@ -141,11 +95,7 @@ class XTAdapter(MarketDataAdapter):
         clock_resynced = False
         while True:
             attempts += 1
-            headers = (
-                self._signed_headers(method, path, query, body)
-                if authenticated
-                else {"Content-Type": "application/json"}
-            )
+            headers = self._signed_headers(method, path, query, body) if authenticated else {"Content-Type": "application/json"}
             try:
                 response = self.session.request(
                     method.upper(),
@@ -160,18 +110,8 @@ class XTAdapter(MarketDataAdapter):
                     continue
                 raise
 
-            payload = self._response_payload(response)
-            message_code = payload.get("mc")
-
-            if (
-                authenticated
-                and message_code == "AUTH_105"
-                and not clock_resynced
-            ):
-                self._sync_server_time()
-                clock_resynced = True
-                continue
-
+            # HTTP transport errors are handled before JSON parsing so a proxy/CDN
+            # HTML error page cannot bypass the retry policy.
             if response.status_code in self.RETRYABLE_STATUS_CODES and attempts <= self.MAX_RETRIES:
                 retry_after = response.headers.get("Retry-After")
                 try:
@@ -179,6 +119,13 @@ class XTAdapter(MarketDataAdapter):
                 except ValueError:
                     delay = 0.25 * (2 ** (attempts - 1))
                 time.sleep(delay)
+                continue
+
+            payload = self._response_payload(response)
+            message_code = payload.get("mc")
+            if authenticated and message_code == "AUTH_105" and not clock_resynced:
+                self._sync_server_time()
+                clock_resynced = True
                 continue
 
             response.raise_for_status()
@@ -208,26 +155,14 @@ class XTAdapter(MarketDataAdapter):
             raise ConnectionError("XT.com is not connected.")
         if not self.api_key or not self.secret_key:
             raise RuntimeError("XT_API_KEY and XT_SECRET_KEY are required for authenticated account access.")
-
         try:
             payload = self._request_json("GET", "/v4/balances", authenticated=True)
             if payload.get("rc") != 0:
-                raise RuntimeError(
-                    f"XT balances error rc={payload.get('rc')}: {payload.get('mc')}"
-                )
-
+                raise RuntimeError(f"XT balances error rc={payload.get('rc')}: {payload.get('mc')}")
             data = payload.get("result", {})
             assets = data.get("assets", []) if isinstance(data, dict) else []
-            usdt = next(
-                (
-                    asset for asset in assets
-                    if isinstance(asset, dict)
-                    and asset.get("currency", "").lower() == "usdt"
-                ),
-                None,
-            )
+            usdt = next((asset for asset in assets if isinstance(asset, dict) and asset.get("currency", "").lower() == "usdt"), None)
             balance = float(usdt.get("availableAmount", 0.0)) if usdt else 0.0
-
             open_orders = self._get_open_orders()
             return AccountState(
                 balance=balance,
@@ -249,36 +184,31 @@ class XTAdapter(MarketDataAdapter):
         xt_interval = interval_map.get(timeframe)
         if not xt_interval:
             raise ValueError(f"Unsupported timeframe mapping for XT.com: {timeframe}")
-
         xt_symbol = symbol.lower().replace("/", "_")
-        query = urlencode(
-            [("interval", xt_interval), ("limit", count), ("symbol", xt_symbol)]
-        )
+        query = urlencode([("interval", xt_interval), ("limit", count), ("symbol", xt_symbol)])
         payload = self._request_json("GET", "/v4/public/kline", query=query)
         if payload.get("rc") != 0:
             raise RuntimeError(f"XT kline error rc={payload.get('rc')}: {payload.get('mc')}")
         result = payload.get("result", [])
         if not isinstance(result, list):
             raise RuntimeError("XT kline endpoint returned an unexpected result")
-
         candles = []
         for kline in result:
             try:
-                candles.append(
-                    {
-                        "time": int(kline[0] if isinstance(kline, list) else kline["t"]) / 1000,
-                        "open": float(kline[1] if isinstance(kline, list) else kline["o"]),
-                        "close": float(kline[2] if isinstance(kline, list) else kline["c"]),
-                        "high": float(kline[3] if isinstance(kline, list) else kline["h"]),
-                        "low": float(kline[4] if isinstance(kline, list) else kline["l"]),
-                        "tick_volume": float(kline[5] if isinstance(kline, list) else kline["q"]),
-                    }
-                )
+                candles.append({
+                    "time": int(kline[0] if isinstance(kline, list) else kline["t"]) / 1000,
+                    "open": float(kline[1] if isinstance(kline, list) else kline["o"]),
+                    "close": float(kline[2] if isinstance(kline, list) else kline["c"]),
+                    "high": float(kline[3] if isinstance(kline, list) else kline["h"]),
+                    "low": float(kline[4] if isinstance(kline, list) else kline["l"]),
+                    "tick_volume": float(kline[5] if isinstance(kline, list) else kline["q"]),
+                })
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 raise RuntimeError("XT kline endpoint returned malformed candle data") from exc
         return candles
 
     def send_order(self, request: OrderRequest) -> OrderResult:
+        """Submit an XT spot order and return the broker order id."""
         if not self.is_connected():
             return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, "XT.com Disconnected")
         if not self.api_key or not self.secret_key:
@@ -295,21 +225,21 @@ class XTAdapter(MarketDataAdapter):
             "quantity": request.volume,
         }
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        logger.info("XT ORDER SUBMISSION: POST %s symbol=%s", path, payload["symbol"])
 
         try:
             data = self._request_json("POST", path, body=body, authenticated=True)
             if data.get("rc") != 0:
-                return self._build_failed_result(
-                    request,
-                    OrderExecutionState.REJECTED_BY_BROKER,
-                    f"XT.com Error: {data.get('mc')}",
-                )
-
-            order_id = data.get("result", {}).get("orderId")
+                return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, f"XT.com Error: {data.get('mc')}")
+            result = data.get("result", {})
+            order_id = result.get("orderId") if isinstance(result, dict) else None
+            if order_id is None:
+                return self._build_failed_result(request, OrderExecutionState.EXECUTION_UNCERTAIN, "XT accepted the request without returning orderId")
+            logger.info("XT ORDER SUBMITTED: order_id=%s", order_id)
             return OrderResult(
                 idempotency_key=request.idempotency_key,
                 correlation_id=request.correlation_id,
-                mt5_ticket=int(order_id) if order_id is not None else None,
+                order_id=int(order_id),
                 execution_state=OrderExecutionState.IN_FLIGHT,
                 fill_price=0.0,
                 filled_volume=0.0,
@@ -321,8 +251,7 @@ class XTAdapter(MarketDataAdapter):
 
     def _get_open_orders(self) -> List[dict]:
         path = "/v4/open-order"
-        query_params = {"bizType": "SPOT"}
-        query = urlencode(sorted(query_params.items()))
+        query = urlencode(sorted({"bizType": "SPOT"}.items()))
         payload = self._request_json("GET", path, query=query, authenticated=True)
         if payload.get("rc") != 0:
             raise RuntimeError(f"XT open-order error rc={payload.get('rc')}: {payload.get('mc')}")
@@ -336,7 +265,7 @@ class XTAdapter(MarketDataAdapter):
         return OrderResult(
             idempotency_key=request.idempotency_key,
             correlation_id=request.correlation_id,
-            mt5_ticket=None,
+            order_id=None,
             execution_state=state,
             fill_price=0.0,
             filled_volume=0.0,
