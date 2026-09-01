@@ -60,7 +60,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip check
       - name: Verify XT execution routing without placing a live order
-        run: python -m pytest -q tests/unit/test_phase9_execution.py tests/unit/test_xt_adapter.py
+        run: python -m pytest -q tests/unit/test_phase9_execution.py tests/unit/test_xt_adapter.py tests/integration/test_safe_pipeline_path.py
 
   execute-trading-cycle:
     if: github.event_name != 'pull_request'
@@ -87,6 +87,11 @@ jobs:
         run: |
           test -n "$XT_API_KEY" || { echo "XT_API_KEY GitHub Actions secret is missing or empty."; exit 1; }
           test -n "$XT_SECRET_KEY" || { echo "XT_SECRET_KEY GitHub Actions secret is missing or empty."; exit 1; }
+      - name: Validate authenticated XT balances
+        env:
+          XT_API_KEY: ${{ secrets.XT_API_KEY }}
+          XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
+        run: python scripts/verify_xt_account.py
       - name: Execute Trading Cycle
         env:
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
