@@ -1,7 +1,62 @@
+"""
+Domain Enums and System State Constants.
+Explicit enumeration of all discrete states, regimes, and decisions.
+"""
+
 from enum import Enum
 
 
+class ConnectionState(str, Enum):
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DEGRADED = "DEGRADED"
+    RECONNECTING = "RECONNECTING"
+
+
+class MarketRegime(str, Enum):
+    STRONG_TREND_UP = "STRONG_TREND_UP"
+    STRONG_TREND_DOWN = "STRONG_TREND_DOWN"
+    RANGE_LOW_VOL = "RANGE_LOW_VOL"
+    RANGE_HIGH_VOL = "RANGE_HIGH_VOL"
+    NEWS = "NEWS"
+    UNKNOWN = "UNKNOWN"
+
+
+class SignalDirection(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class RiskDecision(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class RiskRejectionReason(str, Enum):
+    NONE = "NONE"
+    DAILY_DRAWDOWN_LIMIT = "DAILY_DRAWDOWN_LIMIT"
+    MAX_OPEN_TRADES = "MAX_OPEN_TRADES"
+    SPREAD_TOO_HIGH = "SPREAD_TOO_HIGH"
+    NEWS_BLACKOUT = "NEWS_BLACKOUT"
+    INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"
+    INVALID_STOP = "INVALID_STOP"
+    STALE_SIGNAL = "STALE_SIGNAL"
+    DUPLICATE_SIGNAL = "DUPLICATE_SIGNAL"
+    MAX_CORRELATION_EXCEEDED = "MAX_CORRELATION_EXCEEDED"
+    KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    MODIFIED = "MODIFIED"
+
+
 class OrderExecutionState(str, Enum):
+    PENDING_SUBMISSION = "PENDING_SUBMISSION"
     IN_FLIGHT = "IN_FLIGHT"
     FILLED = "FILLED"
     REJECTED_BY_BROKER = "REJECTED_BY_BROKER"
