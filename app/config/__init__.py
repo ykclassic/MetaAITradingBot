@@ -8,6 +8,9 @@ from typing import List
 from .schema import RiskConfig, SystemConfig
 
 
+DEFAULT_TRADE_SYMBOLS = "BTC_USDT,ETH_USDT,SOL_USDT,BNB_USDT,XRP_USDT,ADA_USDT,LINK_USDT"
+
+
 def _clean_secret(name: str) -> str:
     """Normalize credentials copied through shells/UI and remove hidden Unicode marks."""
     value = unicodedata.normalize("NFKC", os.getenv(name, "")).strip()
@@ -33,10 +36,16 @@ class AppConfig:
     live_trading_enabled: bool = False
     xt_api_key: str = ""
     xt_secret_key: str = ""
+    discord_webhook_url: str = ""
+    performance_db_path: str = "data/trading_system.sqlite"
 
     @classmethod
     def load_from_env(cls) -> "AppConfig":
-        symbols = [s.strip() for s in os.getenv("TRADE_SYMBOLS", "BTC_USDT,ETH_USDT").split(",") if s.strip()]
+        symbols = [
+            s.strip().upper()
+            for s in os.getenv("TRADE_SYMBOLS", DEFAULT_TRADE_SYMBOLS).split(",")
+            if s.strip()
+        ]
         return cls(
             symbols=symbols,
             timeframe=os.getenv("TIMEFRAME", "M15"),
@@ -52,7 +61,9 @@ class AppConfig:
             live_trading_enabled=os.getenv("LIVE_TRADING_ENABLED", "false").lower() in {"1", "true", "yes"},
             xt_api_key=_clean_secret("XT_API_KEY"),
             xt_secret_key=_clean_secret("XT_SECRET_KEY"),
+            discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
+            performance_db_path=os.getenv("PERFORMANCE_DB_PATH", "data/trading_system.sqlite"),
         )
 
 
-__all__ = ["AppConfig", "RiskConfig", "SystemConfig"]
+__all__ = ["AppConfig", "RiskConfig", "SystemConfig", "DEFAULT_TRADE_SYMBOLS"]
