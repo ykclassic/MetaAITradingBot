@@ -22,6 +22,7 @@ def test_performance_metrics_from_closed_trades():
     assert metrics.average_r_multiple == 0.5
     assert metrics.max_drawdown == 50.0
     assert metrics.average_holding_seconds == 90.0
+    db.close()
 
 
 def test_profit_factor_is_json_safe_without_losses():
@@ -29,3 +30,4 @@ def test_profit_factor_is_json_safe_without_losses():
     tracker = PerformanceTracker(db)
     tracker.record_event("TRADE_CLOSED", pnl=100.0, r_multiple=1.0, details={})
     assert tracker.get_metrics().profit_factor is None
+    db.close()
