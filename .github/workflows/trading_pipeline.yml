@@ -3,6 +3,7 @@ name: Quantitative Trading Pipeline
 on:
   push:
     branches:
+      - main
       - fix/restore-trading-bot
   schedule:
     - cron: '*/15 * * * 1-5'
@@ -66,7 +67,7 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: [tests, execution-path-verification]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v5
@@ -96,9 +97,10 @@ jobs:
         env:
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
           XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          TRADE_SYMBOLS: BTC_USDT,ETH_USDT
+          TRADE_SYMBOLS: BTC_USDT,ETH_USDT,SOL_USDT,BNB_USDT,XRP_USDT,ADA_USDT,LINK_USDT
           TIMEFRAME: M15
           RISK_PER_TRADE_PCT: '0.01'
           MAX_DAILY_DRAWDOWN_PCT: '0.05'
@@ -108,6 +110,15 @@ jobs:
           MODEL_DIR: models/
           LOOKBACK_PERIODS: '100'
           RUN_ONCE: 'true'
+          PERFORMANCE_DB_PATH: data/trading_system.sqlite
           LIVE_TRADING_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.live_trading_enabled || 'false' }}
           PYTHONUNBUFFERED: '1'
         run: python main.py
+      - name: Publish trading journal artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-journal-${{ github.run_id }}
+          path: data/trading_system.sqlite
+          if-no-files-found: ignore
+          retention-days: 30
