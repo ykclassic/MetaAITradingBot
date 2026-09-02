@@ -5,7 +5,7 @@ Wires together all domain engines and executes the linear trading pipeline.
 
 import logging
 import time
-from typing import List, Optional
+from typing import List
 
 from app.core.interfaces import (
     MarketDataAdapter,
@@ -52,6 +52,8 @@ class TradingPipeline:
         self.monitor = monitor
         self.performance_tracker = performance_tracker
         self.is_running = False
+        self._startup_notified = False
+        self._shutdown_notified = False
 
     def _journal(self, method: str, *args, **kwargs) -> None:
         """Persistence/analytics failures must not interrupt the trading pipeline."""
@@ -62,11 +64,17 @@ class TradingPipeline:
         except Exception as exc:
             logger.warning("Performance journal write failed: %s", exc)
 
+    def _notify_startup(self) -> None:
+        if self.monitor and not self._startup_notified:
+            self.monitor.startup(self.symbols, self.timeframe, self.execution_engine.live_trading_enabled)
+            self._startup_notified = True
+
     def run_cycle(self) -> None:
         """Execute one complete pass; infrastructure/authentication failures are fatal."""
         if not self.adapter.is_connected():
             raise ConnectionError("Adapter is disconnected. Cannot execute trading cycle.")
 
+        self._notify_startup()
         cycle_started = time.monotonic()
         signal_count = approved_count = execution_count = 0
         logger.info("TRADING CYCLE START: symbols=%s timeframe=%s", ",".join(self.symbols), self.timeframe)
@@ -183,8 +191,6 @@ class TradingPipeline:
         """Start the continuous trading loop."""
         self.is_running = True
         logger.info("Starting the Trading Pipeline...")
-        if self.monitor:
-            self.monitor.startup(self.symbols, self.timeframe, self.execution_engine.live_trading_enabled)
         if not self.adapter.connect():
             raise ConnectionError("Failed to connect to the broker. Aborting startup.")
         try:
@@ -201,6 +207,7 @@ class TradingPipeline:
         """Safely stop the pipeline and disconnect the adapter."""
         self.is_running = False
         self.adapter.disconnect()
-        if self.monitor:
+        if self.monitor and not self._shutdown_notified:
             self.monitor.shutdown()
+            self._shutdown_notified = True
         logger.info("Trading Pipeline stopped safely.")
