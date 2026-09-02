@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
@@ -22,7 +21,7 @@ class PerformanceMetrics:
     net_pnl: float
     gross_profit: float
     gross_loss: float
-    profit_factor: float
+    profit_factor: Optional[float]
     expectancy: float
     average_win: float
     average_loss: float
@@ -197,7 +196,8 @@ class PerformanceTracker:
             peak = max(peak, equity)
             max_drawdown = max(max_drawdown, peak - equity)
 
-        profit_factor = gross_profit / gross_loss if gross_loss else (math.inf if gross_profit else 0.0)
+        # Profit factor is undefined when no losing trade exists, so expose it as null.
+        profit_factor = gross_profit / gross_loss if gross_loss else None
         expectancy = sum(pnls) / len(pnls) if pnls else 0.0
         return PerformanceMetrics(
             total_trades=len(pnls),
