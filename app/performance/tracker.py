@@ -163,29 +163,58 @@ class PerformanceTracker:
         )
 
     def get_metrics(self, since: Optional[datetime] = None) -> PerformanceMetrics:
-        where = "WHERE event_type = 'TRADE_CLOSED'"
-        params: list[Any] = []
-        if since:
-            where += " AND event_time >= ?"
-            params.append(since.astimezone(timezone.utc).isoformat())
+        """Aggregate closed trades from the canonical outcomes table and journal events.
 
+        The correlation id prevents double-counting when an outcome is written to both
+        the existing trade_outcomes repository and the journal_events table.
+        """
+        since_iso = since.astimezone(timezone.utc).isoformat() if since else None
         with self.db.get_connection() as conn:
-            rows = conn.execute(
-                f"SELECT pnl, r_multiple, details_json FROM journal_events {where} ORDER BY event_time ASC",
-                params,
-            ).fetchall()
+            outcome_query = "SELECT correlation_id, realized_pnl, r_multiple, holding_seconds, closed_at FROM trade_outcomes"
+            outcome_params: list[Any] = []
+            if since_iso:
+                outcome_query += " WHERE closed_at >= ?"
+                outcome_params.append(since_iso)
+            outcome_rows = conn.execute(outcome_query, outcome_params).fetchall()
 
-        pnls = [float(row["pnl"]) for row in rows if row["pnl"] is not None]
-        rs = [float(row["r_multiple"]) for row in rows if row["r_multiple"] is not None]
-        holds = []
-        for row in rows:
-            try:
-                value = json.loads(row["details_json"]).get("holding_seconds")
-                if value is not None:
-                    holds.append(float(value))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            journal_query = """SELECT correlation_id, pnl, r_multiple, details_json, event_time
+                             FROM journal_events WHERE event_type = 'TRADE_CLOSED'"""
+            journal_params: list[Any] = []
+            if since_iso:
+                journal_query += " AND event_time >= ?"
+                journal_params.append(since_iso)
+            journal_rows = conn.execute(journal_query, journal_params).fetchall()
+
+        trades: list[tuple[str, float, float, float]] = []
+        seen: set[str] = set()
+        for row in outcome_rows:
+            correlation_id = str(row["correlation_id"])
+            seen.add(correlation_id)
+            trades.append((
+                correlation_id,
+                float(row["realized_pnl"]),
+                float(row["r_multiple"]),
+                float(row["holding_seconds"]),
+            ))
+
+        for row in journal_rows:
+            correlation_id = str(row["correlation_id"] or f"journal:{row['event_time']}")
+            if correlation_id in seen:
                 continue
+            try:
+                holding = float(json.loads(row["details_json"]).get("holding_seconds", 0.0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                holding = 0.0
+            trades.append((
+                correlation_id,
+                float(row["pnl"] or 0.0),
+                float(row["r_multiple"] or 0.0),
+                holding,
+            ))
 
+        pnls = [trade[1] for trade in trades]
+        rs = [trade[2] for trade in trades]
+        holds = [trade[3] for trade in trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         gross_profit = sum(wins)
