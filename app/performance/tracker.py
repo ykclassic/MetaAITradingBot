@@ -232,7 +232,7 @@ class PerformanceTracker:
             total_trades=len(pnls),
             winning_trades=len(wins),
             losing_trades=len(losses),
-            win_rate_pct=(len(wins) / len(pnls) * 100.0) if pnls else 0.0,
+            win_rate_pct=(100.0 * len(wins) / len(pnls)) if pnls else 0.0,
             net_pnl=sum(pnls),
             gross_profit=gross_profit,
             gross_loss=gross_loss,
