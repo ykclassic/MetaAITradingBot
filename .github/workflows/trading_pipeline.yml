@@ -81,6 +81,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip check
+      - name: Verify XT trading universe market data
+        run: python scripts/verify_trading_universe.py
       - name: Verify XT credentials are configured
         env:
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
