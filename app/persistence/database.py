@@ -3,11 +3,12 @@ SQLite Database Connection and Schema Management.
 Ensures thread-safe connections and schema initialization.
 """
 
-import sqlite3
 import logging
-from pathlib import Path
+import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,10 @@ class SQLiteManager:
     def __init__(self, db_path: str = "data/trading_system.sqlite"):
         self._is_memory = db_path == ":memory:"
         if self._is_memory:
-            # Keep one anchor connection alive so all test connections share
-            # the same in-memory database.
-            self.db_path = "file:trading_system_test?mode=memory&cache=shared"
+            # Keep one anchor connection alive so all connections belonging to
+            # this manager share the same in-memory database. Each manager gets
+            # a unique URI, preventing state from leaking between test cases.
+            self.db_path = f"file:trading_system_test_{uuid4().hex}?mode=memory&cache=shared"
             self._uri = True
             self._anchor = sqlite3.connect(self.db_path, uri=True)
             self._anchor.row_factory = sqlite3.Row
