@@ -11,6 +11,9 @@ from app.config import AppConfig
 from app.data.xt_adapter import XTAdapter
 from app.execution.engine import ExecutionEngine
 from app.features.engine import PandasFeatureEngine
+from app.monitor.discord import DiscordSystemMonitor
+from app.persistence.database import SQLiteManager
+from app.performance.tracker import PerformanceTracker
 from app.pipeline.orchestrator import TradingPipeline
 from app.regimes.hmm_detector import HMMRegimeDetector
 from app.regimes.manager import ModelManager
@@ -34,6 +37,8 @@ def setup_logging() -> None:
 def build_pipeline(config: AppConfig) -> TradingPipeline:
     adapter = XTAdapter(api_key=config.xt_api_key, secret_key=config.xt_secret_key)
     model_manager = ModelManager(model_dir=config.model_dir)
+    monitor = DiscordSystemMonitor(config.discord_webhook_url)
+    performance_tracker = PerformanceTracker(SQLiteManager(config.performance_db_path))
 
     model_path = os.path.join(config.model_dir, f"hmm_v_{config.model_version}.joblib")
     mapping_path = os.path.join(config.model_dir, f"mapping_v_{config.model_version}.json")
@@ -95,6 +100,8 @@ def build_pipeline(config: AppConfig) -> TradingPipeline:
         symbols=config.symbols,
         timeframe=config.timeframe,
         lookback_periods=config.lookback_periods,
+        monitor=monitor,
+        performance_tracker=performance_tracker,
     )
 
 
