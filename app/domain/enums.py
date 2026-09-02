@@ -3,7 +3,7 @@ Domain Enums and System State Constants.
 Explicit enumeration of all discrete states, regimes, and decisions.
 """
 
-from enum import Enum, auto
+from enum import Enum
 
 
 class ConnectionState(str, Enum):
@@ -70,4 +70,4 @@ class ExitReason(str, Enum):
     MANUAL_CLOSE = "MANUAL_CLOSE"
     SIGNAL_INVALIDATION = "SIGNAL_INVALIDATION"
     HARD_KILL_SWITCH = "HARD_KILL_SWITCH"
-    TIME_EXPIRATION = "TIME_EXPIRATION"s
+    TIME_EXPIRATION = "TIME_EXPIRATION"

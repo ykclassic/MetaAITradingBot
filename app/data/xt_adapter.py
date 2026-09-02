@@ -1,198 +1,300 @@
-"""
-XT.com Implementation of the MarketDataAdapter Protocol.
-Interacts with the XT.com REST API for market data and order execution.
-"""
+"""XT.com implementation of the MarketDataAdapter protocol."""
 
-import hmac
 import hashlib
-import time
-import requests
+import hmac
+import json
 import logging
+import time
+import unicodedata
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
+from urllib.parse import urlencode
+
+import requests
+from requests import Response
 
 from app.core.interfaces import MarketDataAdapter
+from app.domain.enums import ConnectionState, OrderExecutionState, SignalDirection
 from app.domain.models import AccountState, OrderRequest, OrderResult, Position
-from app.domain.enums import ConnectionState, SignalDirection, OrderExecutionState
 
 logger = logging.getLogger(__name__)
 
+
+def _clean_credential(value: str) -> str:
+    """Normalize credentials copied through UIs that may add invisible Unicode marks."""
+    return "".join(ch for ch in value if unicodedata.category(ch) != "Cf").strip()
+
+
 class XTAdapter(MarketDataAdapter):
     BASE_URL = "https://sapi.xt.com"
+    RECV_WINDOW_MS = 5000
+    REQUEST_TIMEOUT = (3.05, 10.0)
+    MAX_RETRIES = 2
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
     def __init__(self, api_key: str, secret_key: str):
-        self.api_key = api_key
-        self.secret_key = secret_key
+        self.api_key = _clean_credential(api_key)
+        self.secret_key = _clean_credential(secret_key)
         self._state = ConnectionState.DISCONNECTED
         self.session = requests.Session()
+        self._server_time_offset_ms = 0
 
-    def _generate_signature(self, query_string: str, timestamp: str) -> str:
-        """Generates HMAC SHA256 signature required by XT.com API."""
-        payload = f"{query_string}#{timestamp}"
+    def _timestamp_ms(self) -> str:
+        return str(int(time.time() * 1000) + self._server_time_offset_ms)
+
+    def _signature(self, method: str, path: str, timestamp: str, query: str = "", body: str = "") -> str:
+        header_component = (
+            f"validate-algorithms=HmacSHA256"
+            f"&validate-appkey={self.api_key}"
+            f"&validate-recvwindow={self.RECV_WINDOW_MS}"
+            f"&validate-timestamp={timestamp}"
+        )
+        components = [method.upper(), path]
+        if query:
+            components.append(query)
+        if body:
+            components.append(body)
+        signing_payload = f"{header_component}#" + "#".join(components)
         return hmac.new(
-            self.secret_key.encode('utf-8'),
-            payload.encode('utf-8'),
-            hashlib.sha256
+            self.secret_key.encode("utf-8"),
+            signing_payload.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
 
-    def _get_headers(self, query_string: str = "") -> dict:
-        timestamp = str(int(time.time() * 1000))
+    def _signed_headers(self, method: str, path: str, query: str = "", body: str = "", timestamp: Optional[str] = None) -> dict:
+        timestamp = timestamp or self._timestamp_ms()
         return {
+            "validate-algorithms": "HmacSHA256",
             "validate-appkey": self.api_key,
+            "validate-recvwindow": str(self.RECV_WINDOW_MS),
             "validate-timestamp": timestamp,
-            "validate-signature": self._generate_signature(query_string, timestamp),
-            "Content-Type": "application/json"
+            "validate-signature": self._signature(method, path, timestamp, query, body),
+            "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _response_payload(response: Response) -> dict:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"XT returned non-JSON response (HTTP {response.status_code})") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("XT returned an unexpected JSON payload type")
+        return payload
+
+    def _sync_server_time(self) -> None:
+        started = int(time.time() * 1000)
+        response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=self.REQUEST_TIMEOUT)
+        response.raise_for_status()
+        ended = int(time.time() * 1000)
+        payload = self._response_payload(response)
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"XT time endpoint returned rc={payload.get('rc')}: {payload.get('mc')}")
+        server_time = payload.get("result", {}).get("serverTime")
+        if server_time is None:
+            raise RuntimeError("XT time endpoint returned no serverTime")
+        self._server_time_offset_ms = int(server_time) - ((started + ended) // 2)
+
+    def _request_json(self, method: str, path: str, *, query: str = "", body: str = "", authenticated: bool = False) -> dict:
+        url = f"{self.BASE_URL}{path}"
+        if query:
+            url = f"{url}?{query}"
+
+        attempts = 0
+        clock_resynced = False
+        while True:
+            attempts += 1
+            headers = self._signed_headers(method, path, query, body) if authenticated else {"Content-Type": "application/json"}
+            try:
+                response = self.session.request(
+                    method.upper(),
+                    url,
+                    headers=headers,
+                    data=body if body else None,
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+            except requests.RequestException:
+                if attempts <= self.MAX_RETRIES:
+                    time.sleep(0.25 * (2 ** (attempts - 1)))
+                    continue
+                raise
+
+            if response.status_code in self.RETRYABLE_STATUS_CODES and attempts <= self.MAX_RETRIES:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = min(float(retry_after), 5.0) if retry_after else 0.25 * (2 ** (attempts - 1))
+                except ValueError:
+                    delay = 0.25 * (2 ** (attempts - 1))
+                time.sleep(delay)
+                continue
+
+            payload = self._response_payload(response)
+            message_code = payload.get("mc")
+            if authenticated and message_code == "AUTH_105" and not clock_resynced:
+                self._sync_server_time()
+                clock_resynced = True
+                continue
+
+            response.raise_for_status()
+            return payload
+
     def connect(self) -> bool:
-        """Validates connection by hitting a public XT.com endpoint."""
         self._state = ConnectionState.CONNECTING
         try:
-            response = self.session.get(f"{self.BASE_URL}/v4/public/time", timeout=5)
-            response.raise_for_status()
+            self._sync_server_time()
             self._state = ConnectionState.CONNECTED
             logger.info("Successfully connected to XT.com API.")
             return True
-        except requests.RequestException as e:
-            logger.error(f"XT.com connection failed: {e}")
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            logger.error("XT.com connection failed: %s", exc)
             self._state = ConnectionState.DISCONNECTED
             return False
 
     def disconnect(self) -> None:
         self.session.close()
         self._state = ConnectionState.DISCONNECTED
-        logger.info("Disconnected from XT.com.")
 
     def is_connected(self) -> bool:
         return self._state == ConnectionState.CONNECTED
 
-    def get_account_state(self) -> AccountState:
-        """Fetches wallet balances from XT.com and maps to Domain AccountState."""
+    def get_account_balances(self) -> Dict[str, dict]:
+        """Return XT spot balances keyed by currency without exposing credentials."""
         if not self.is_connected():
             raise ConnectionError("XT.com is not connected.")
+        payload = self._request_json("GET", "/v4/balances", authenticated=True)
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"XT balances error rc={payload.get('mc')}: {payload.get('mc')}")
+        result = payload.get("result", {})
+        assets = result.get("assets", []) if isinstance(result, dict) else []
+        balances: Dict[str, dict] = {}
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            currency = str(asset.get("currency", "")).lower()
+            if not currency:
+                continue
+            balances[currency] = {
+                "available": float(asset.get("availableAmount", 0.0)),
+                "frozen": float(asset.get("frozenAmount", 0.0)),
+                "total": float(asset.get("totalAmount", 0.0)),
+            }
+        return balances
 
+    def get_account_state(self) -> AccountState:
+        if not self.is_connected():
+            raise ConnectionError("XT.com is not connected.")
+        if not self.api_key or not self.secret_key:
+            raise RuntimeError("XT_API_KEY and XT_SECRET_KEY are required for authenticated account access.")
         try:
-            response = self.session.get(
-                f"{self.BASE_URL}/v4/balances", 
-                headers=self._get_headers(),
-                timeout=5
-            )
-            response.raise_for_status()
-            data = response.json().get("result", {})
-            
-            # Simplified aggregation: assuming a unified USDT margin balance for quant trading
-            usdt_asset = next((asset for asset in data.get("assets", []) if asset["currency"] == "usdt"), None)
-            balance = float(usdt_asset["availableAmount"]) if usdt_asset else 0.0
-            
-            positions = self.get_open_positions()
-
+            balances = self.get_account_balances()
+            usdt = balances.get("usdt", {"available": 0.0})
+            balance = float(usdt["available"])
+            open_orders = self._get_open_orders()
             return AccountState(
                 balance=balance,
-                equity=balance, # Simplified unless tracking unrealized PnL via websockets
+                equity=balance,
                 margin=0.0,
                 free_margin=balance,
                 daily_start_equity=balance,
                 current_daily_drawdown_pct=0.0,
-                open_positions_count=len(positions)
+                open_positions_count=len(open_orders),
             )
-        except Exception as e:
+        except Exception as exc:
             self._state = ConnectionState.DEGRADED
-            raise RuntimeError(f"Failed to retrieve account info from XT.com: {e}")
+            raise RuntimeError(f"Failed to retrieve account info from XT.com: {exc}") from exc
 
     def get_ohlcv(self, symbol: str, timeframe: str, count: int) -> List[dict]:
-        """Fetches historical klines from XT.com."""
+        if count <= 0:
+            raise ValueError("count must be greater than zero")
         interval_map = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
         xt_interval = interval_map.get(timeframe)
-        
         if not xt_interval:
             raise ValueError(f"Unsupported timeframe mapping for XT.com: {timeframe}")
-
-        # XT.com requires symbols in lowercase underscore format (e.g., btc_usdt)
         xt_symbol = symbol.lower().replace("/", "_")
-        
-        try:
-            params = {"symbol": xt_symbol, "interval": xt_interval, "limit": count}
-            response = self.session.get(
-                f"{self.BASE_URL}/v4/public/kline", 
-                params=params,
-                timeout=5
-            )
-            response.raise_for_status()
-            data = response.json().get("result", [])
-            
-            # Map XT.com standard array [t, o, c, h, l, v, ...] to Domain Dict
-            return [{
-                "time": int(kline[0]) / 1000, # Convert ms to s
-                "open": float(kline[1]),
-                "close": float(kline[2]),
-                "high": float(kline[3]),
-                "low": float(kline[4]),
-                "tick_volume": float(kline[5])
-            } for kline in data]
-            
-        except Exception as e:
-            raise ValueError(f"Error fetching OHLCV from XT.com for {symbol}: {e}")
+        query = urlencode([("interval", xt_interval), ("limit", count), ("symbol", xt_symbol)])
+        payload = self._request_json("GET", "/v4/public/kline", query=query)
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"XT kline error rc={payload.get('mc')}: {payload.get('mc')}")
+        result = payload.get("result", [])
+        if not isinstance(result, list):
+            raise RuntimeError("XT kline endpoint returned an unexpected result")
+        candles = []
+        for kline in result:
+            try:
+                candles.append({
+                    "time": int(kline[0] if isinstance(kline, list) else kline["t"]) / 1000,
+                    "open": float(kline[1] if isinstance(kline, list) else kline["o"]),
+                    "close": float(kline[2] if isinstance(kline, list) else kline["c"]),
+                    "high": float(kline[3] if isinstance(kline, list) else kline["h"]),
+                    "low": float(kline[4] if isinstance(kline, list) else kline["l"]),
+                    "tick_volume": float(kline[5] if isinstance(kline, list) else kline["q"]),
+                })
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise RuntimeError("XT kline endpoint returned malformed candle data") from exc
+        return candles
 
     def send_order(self, request: OrderRequest) -> OrderResult:
-        """Translates and submits the order to XT.com."""
         if not self.is_connected():
             return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, "XT.com Disconnected")
+        if not self.api_key or not self.secret_key:
+            return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, "Missing XT credentials")
 
-        xt_symbol = request.symbol.lower().replace("/", "_")
-        side = "BUY" if request.direction == SignalDirection.BUY else "SELL"
-        
+        path = "/v4/order"
         payload = {
-            "symbol": xt_symbol,
-            "clientOrderId": request.idempotency_key[:32], # XT.com limits client order ID length
-            "side": side,
+            "symbol": request.symbol.lower().replace("/", "_"),
+            "clientOrderId": request.idempotency_key[:32],
+            "side": "BUY" if request.direction == SignalDirection.BUY else "SELL",
             "type": "LIMIT",
             "timeInForce": "GTC",
-            "price": str(request.price),
-            "quantity": str(request.volume)
+            "bizType": "SPOT",
+            "price": request.price,
+            "quantity": request.volume,
         }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        logger.info("XT ORDER SUBMISSION: POST %s symbol=%s", path, payload["symbol"])
 
         try:
-            # Note: query_string for POST body requires URL encoded payload logic in production
-            response = self.session.post(
-                f"{self.BASE_URL}/v4/order",
-                json=payload,
-                headers=self._get_headers(str(payload)),
-                timeout=5
+            data = self._request_json("POST", path, body=body, authenticated=True)
+            if data.get("rc") != 0:
+                return self._build_failed_result(request, OrderExecutionState.REJECTED_BY_BROKER, f"XT.com Error: {data.get('mc')}")
+            result = data.get("result", {})
+            order_id = result.get("orderId") if isinstance(result, dict) else None
+            if order_id is None:
+                return self._build_failed_result(request, OrderExecutionState.EXECUTION_UNCERTAIN, "XT accepted the request without returning orderId")
+            logger.info("XT ORDER SUBMITTED: order_id=%s", order_id)
+            return OrderResult(
+                idempotency_key=request.idempotency_key,
+                correlation_id=request.correlation_id,
+                order_id=int(order_id),
+                execution_state=OrderExecutionState.IN_FLIGHT,
+                fill_price=0.0,
+                filled_volume=0.0,
+                executed_at=datetime.now(timezone.utc),
             )
-            data = response.json()
-            
-            if data.get("rc") == 0:
-                result = data.get("result", {})
-                return OrderResult(
-                    idempotency_key=request.idempotency_key,
-                    correlation_id=request.correlation_id,
-                    mt5_ticket=result.get("orderId"), # Repurposing mt5_ticket field for universal order_id
-                    execution_state=OrderExecutionState.FILLED,
-                    fill_price=request.price,
-                    filled_volume=request.volume,
-                    executed_at=datetime.now(timezone.utc)
-                )
-            else:
-                return self._build_failed_result(
-                    request, OrderExecutionState.REJECTED_BY_BROKER, f"XT.com Error: {data.get('mc')}"
-                )
-
-        except Exception as e:
+        except Exception as exc:
             self._state = ConnectionState.DEGRADED
-            return self._build_failed_result(request, OrderExecutionState.EXECUTION_UNCERTAIN, str(e))
+            return self._build_failed_result(request, OrderExecutionState.EXECUTION_UNCERTAIN, str(exc))
+
+    def _get_open_orders(self) -> List[dict]:
+        path = "/v4/open-order"
+        query = urlencode(sorted({"bizType": "SPOT"}.items()))
+        payload = self._request_json("GET", path, query=query, authenticated=True)
+        if payload.get("rc") != 0:
+            raise RuntimeError(f"XT open-order error rc={payload.get('mc')}: {payload.get('mc')}")
+        result = payload.get("result", [])
+        return result if isinstance(result, list) else []
 
     def get_open_positions(self) -> List[Position]:
-        # Implementation for XT.com open orders/positions query
         return []
 
     def _build_failed_result(self, request: OrderRequest, state: OrderExecutionState, msg: str) -> OrderResult:
         return OrderResult(
             idempotency_key=request.idempotency_key,
             correlation_id=request.correlation_id,
-            mt5_ticket=None,
+            order_id=None,
             execution_state=state,
             fill_price=0.0,
             filled_volume=0.0,
             executed_at=datetime.now(timezone.utc),
-            error_message=msg
+            error_message=msg,
         )

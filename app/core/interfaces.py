@@ -4,7 +4,6 @@ Enforces Dependency Inversion across all major sub-systems.
 """
 
 from typing import Protocol, List, Optional
-from uuid import UUID
 
 from app.domain.models import (
     FeatureSnapshot,
@@ -42,7 +41,20 @@ class RegimeDetectorProtocol(Protocol):
 class StrategyProtocol(Protocol):
     name: str
     version: str
-    def generate_signal(self, features: FeatureSnapshot, regime: RegimeResult) -> Optional[Signal]: ...
+
+    def generate_signal(
+        self, features: FeatureSnapshot, regime: RegimeResult
+    ) -> Optional[Signal]: ...
+
+
+class StrategySelectorProtocol(Protocol):
+    def evaluate(
+        self, features: FeatureSnapshot, regime: RegimeResult
+    ) -> Optional[Signal]: ...
+
+
+class SignalSelectorProtocol(Protocol):
+    def select_best_signal(self, signals: List[Signal]) -> Optional[Signal]: ...
 
 
 class RiskManagerProtocol(Protocol):

@@ -1,25 +1,25 @@
-# Core Framework & Utilities
+# Runtime
 python-dotenv
 pydantic
 requests
 numpy
 pandas
+joblib
+hmmlearn
 
-# Exchange Integration & Trading APIs
+# Exchange / data
 ccxt
 
-# Database & Storage
+# Database
 supabase
 psycopg2-binary
 
-# Telegram Bot & Notifications (if applicable)
+# Notifications / scheduling
 python-telegram-bot
-
-# Logging & Monitoring
-colorlog
 schedule
+colorlog
 
-# Web Dashboard / API (if using FastAPI/Streamlit components)
+# Optional web UI/API
 fastapi
 uvicorn
 streamlit

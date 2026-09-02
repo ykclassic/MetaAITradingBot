@@ -1,11 +1,11 @@
 """
 Core Domain Data Models.
-All structures are strongly typed, immutable dataclasses representing state transitions.
+All structures are strongly typed dataclasses representing state transitions.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 from uuid import UUID, uuid4
 
 from app.domain.enums import (
@@ -102,7 +102,7 @@ class OrderRequest:
 class OrderResult:
     idempotency_key: str
     correlation_id: UUID
-    mt5_ticket: Optional[int]
+    order_id: Optional[int]
     execution_state: OrderExecutionState
     fill_price: float
     filled_volume: float
@@ -151,8 +151,9 @@ class StrategyWeight:
     updated_at: datetime
 
 
-@dataclass(frozen=True)
+@dataclass
 class AccountState:
+    """Mutable point-in-time account snapshot used by risk checks and tests."""
     balance: float
     equity: float
     margin: float

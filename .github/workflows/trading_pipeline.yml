@@ -1,51 +1,113 @@
 name: Quantitative Trading Pipeline
 
 on:
-  # Scheduled execution: Runs every 15 minutes to align with the M15 timeframe strategy
+  push:
+    branches:
+      - fix/restore-trading-bot
   schedule:
-    - cron: '*/15 * * * 1-5' # Runs every 15 mins, Monday through Friday
-  
-  # Allows manual triggering from the GitHub Actions tab for testing
+    - cron: '*/15 * * * 1-5'
   workflow_dispatch:
+    inputs:
+      live_trading_enabled:
+        description: 'Enable real XT order submission (use only for an intentional live run)'
+        required: true
+        default: false
+        type: boolean
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quantitative-trading-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  execute-trading-cycle:
+  tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 5 # Fail fast to prevent runaway compute costs
-
+    timeout-minutes: 10
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v5
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          cache: 'pip' # Speeds up execution by caching dependencies
-
+          cache: pip
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -m pip check
+      - name: Run Tests
+        run: python -m pytest -q
 
-      - name: Execute Trading Engine
+  execution-path-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: tests
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
+      - name: Verify XT execution routing without placing a live order
+        run: python -m pytest -q tests/unit/test_phase9_execution.py tests/unit/test_xt_adapter.py tests/integration/test_safe_pipeline_path.py
+
+  execute-trading-cycle:
+    if: github.event_name != 'pull_request'
+    needs: [tests, execution-path-verification]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
+      - name: Verify XT credentials are configured
         env:
-          # Cloud Database Persistence
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          
-          # XT.com Exchange Credentials
           XT_API_KEY: ${{ secrets.XT_API_KEY }}
           XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
-          
-          # Trading Parameters
-          TRADE_SYMBOLS: "BTC_USDT,ETH_USDT" 
-          TIMEFRAME: "M15"
-          RISK_PER_TRADE_PCT: "0.01"
-          MAX_DAILY_DRAWDOWN_PCT: "0.05"
-          MODEL_VERSION: "v1.0.0"
-        
-        # Executes the composition root. 
-        # The script will run one full cycle across the symbols, log state to Supabase, and exit gracefully.
         run: |
-          python main.py
+          test -n "$XT_API_KEY" || { echo "XT_API_KEY GitHub Actions secret is missing or empty."; exit 1; }
+          test -n "$XT_SECRET_KEY" || { echo "XT_SECRET_KEY GitHub Actions secret is missing or empty."; exit 1; }
+      - name: Validate authenticated XT balances
+        env:
+          XT_API_KEY: ${{ secrets.XT_API_KEY }}
+          XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
+        run: python scripts/verify_xt_account.py
+      - name: Execute Trading Cycle
+        env:
+          XT_API_KEY: ${{ secrets.XT_API_KEY }}
+          XT_SECRET_KEY: ${{ secrets.XT_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TRADE_SYMBOLS: BTC_USDT,ETH_USDT
+          TIMEFRAME: M15
+          RISK_PER_TRADE_PCT: '0.01'
+          MAX_DAILY_DRAWDOWN_PCT: '0.05'
+          MAX_OPEN_POSITIONS: '3'
+          CONTRACT_SIZE: '1.0'
+          MODEL_VERSION: v1.0.0
+          MODEL_DIR: models/
+          LOOKBACK_PERIODS: '100'
+          RUN_ONCE: 'true'
+          LIVE_TRADING_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.live_trading_enabled || 'false' }}
+          PYTHONUNBUFFERED: '1'
+        run: python main.py
